@@ -2,6 +2,8 @@ import sys
 import json
 import os
 import re
+import csv
+from datetime import datetime
 import sqlite3
 import webbrowser
 import urllib.parse
@@ -292,6 +294,40 @@ class GoogleDriveSync:
             print(f"연결 실패: {e}")
             return False
 
+    def find_file_in_folder_by_name(self, file_name: str):
+        """지정한 Drive 폴더( drive_folder_id ) 안에서 파일명을 기준으로 파일 1개를 찾습니다."""
+        if not self.service:
+            return None
+        query = f"'{self.drive_folder_id}' in parents and trashed=false and name='{file_name}'"
+        results = (
+            self.service.files()
+            .list(q=query, pageSize=5, fields="files(id, name, mimeType, modifiedTime)")
+            .execute()
+        )
+        files = results.get("files", [])
+        return files[0] if files else None
+
+    def download_named_file(self, file_name: str, local_path: str) -> bool:
+        """Drive 폴더에서 file_name 파일을 찾아 local_path로 다운로드합니다."""
+        item = self.find_file_in_folder_by_name(file_name)
+        if not item:
+            return False
+        # Google 스프레드시트인 경우 CSV로 내보내기(export) 필요
+        mime_type = item.get("mimeType", "")
+        if mime_type == "application/vnd.google-apps.spreadsheet":
+            self._export_spreadsheet_as_csv(item["id"], local_path)
+        else:
+            self._download_file(item["id"], local_path)
+        return True
+
+    def _export_spreadsheet_as_csv(self, file_id: str, file_path: str):
+        request = self.service.files().export_media(fileId=file_id, mimeType="text/csv")
+        with open(file_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+
     def _download_file(self, file_id, file_path):
         request = self.service.files().get_media(fileId=file_id)
         with open(file_path, "wb") as fh:
@@ -299,6 +335,56 @@ class GoogleDriveSync:
             done = False
             while done is False:
                 status, done = downloader.next_chunk()
+
+
+# --- [Google Drive + Sheets(쓰기) 연동] ---
+class GoogleWorkspaceSync:
+    """Drive(목록/내보내기) + Sheets(행 업데이트/추가) 동시 사용을 위한 헬퍼"""
+
+    def __init__(self, service_account_file, drive_folder_id, app_dir):
+        self.SCOPES = [
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/spreadsheets",
+        ]
+        self.service_account_file = service_account_file
+        self.drive_folder_id = drive_folder_id
+        self.app_dir = app_dir
+        self.drive = None
+        self.sheets = None
+
+    def connect(self):
+        if not GOOGLE_LIB_AVAILABLE:
+            return False
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                self.service_account_file, scopes=self.SCOPES
+            )
+            self.drive = build("drive", "v3", credentials=creds)
+            self.sheets = build("sheets", "v4", credentials=creds)
+            return True
+        except Exception as e:
+            print(f"연결 실패: {e}")
+            return False
+
+    def find_file_in_folder_by_name(self, file_name: str):
+        if not self.drive:
+            return None
+        query = f"'{self.drive_folder_id}' in parents and trashed=false and name='{file_name}'"
+        results = (
+            self.drive.files()
+            .list(q=query, pageSize=5, fields="files(id, name, mimeType, modifiedTime)")
+            .execute()
+        )
+        files = results.get("files", [])
+        return files[0] if files else None
+
+    def get_first_sheet_title(self, spreadsheet_id: str) -> str:
+        meta = self.sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheets = meta.get("sheets", [])
+        if not sheets:
+            return "Sheet1"
+        props = sheets[0].get("properties", {})
+        return props.get("title", "Sheet1")
 
 
 # --- [동기화 진행 상황 다이얼로그] ---
@@ -456,6 +542,353 @@ class SyncThread(QThread):
             self.finished_signal.emit(False, 0, False, f"오류 발생: {str(e)}")
 
 
+# --- [메타데이터(DB) 동기화 스레드] ---
+class MetadataSyncThread(QThread):
+    """Drive에 있는 song_metadata.csv(기본값)를 내려받아 로컬 SQLite DB를 갱신합니다."""
+
+    log_signal = Signal(str)
+    finished_signal = Signal(bool, int, str)
+
+    def __init__(self, sync_helper, csv_name, db_path, sheet_music_path):
+        super().__init__()
+        self.sync_helper = sync_helper
+        self.csv_name = csv_name
+        self.db_path = db_path
+        self.sheet_music_path = sheet_music_path
+
+    def _ensure_db_columns(self, con: sqlite3.Connection):
+        """기존 DB가 있을 때 컬럼이 부족하면 안전하게 추가합니다."""
+        cur = con.cursor()
+        cur.execute("PRAGMA table_info(song_metadata)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "updated_at" not in cols:
+            cur.execute("ALTER TABLE song_metadata ADD COLUMN updated_at TEXT")
+        if "updated_by" not in cols:
+            cur.execute("ALTER TABLE song_metadata ADD COLUMN updated_by TEXT")
+        if "dirty" not in cols:
+            cur.execute("ALTER TABLE song_metadata ADD COLUMN dirty INTEGER DEFAULT 0")
+        con.commit()
+
+    def _to_abs_path(self, raw_path: str) -> str:
+        if not raw_path:
+            return ""
+        p = raw_path.strip().replace("/", os.sep)
+        # 이미 절대경로(윈도우 드라이브/UNC)라면 그대로
+        if os.path.isabs(p):
+            return os.path.normpath(p)
+        # 상대경로라면 악보 폴더 기준으로 합치기
+        return os.path.normpath(os.path.join(self.sheet_music_path, p))
+
+    def run(self):
+        try:
+            self.log_signal.emit("Google Drive에 연결 중...")
+            if not self.sync_helper.connect():
+                self.finished_signal.emit(
+                    False, 0, "구글 인증 실패: service_account.json 확인"
+                )
+                return
+
+            # 1) CSV 다운로드
+            self.log_signal.emit(f"메타데이터 파일 찾는 중: {self.csv_name}")
+            local_csv_path = os.path.join(self.sync_helper.app_dir, self.csv_name)
+            ok = self.sync_helper.download_named_file(self.csv_name, local_csv_path)
+            if not ok:
+                self.finished_signal.emit(
+                    False,
+                    0,
+                    f"Drive 폴더에서 '{self.csv_name}' 파일을 찾을 수 없습니다. (파일명 확인)",
+                )
+                return
+
+            self.log_signal.emit(f"다운로드 완료: {local_csv_path}")
+
+            # 2) CSV 파싱 & DB 반영
+            updated_rows = 0
+            con = sqlite3.connect(self.db_path)
+            cur = con.cursor()
+
+            # 테이블이 없다면 생성(기존 init_database와 동일한 기본 구조 + 확장 컬럼)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS song_metadata (
+                    file_path TEXT PRIMARY KEY,
+                    song_key TEXT,
+                    lyrics TEXT,
+                    updated_at TEXT,
+                    updated_by TEXT,
+                    dirty INTEGER DEFAULT 0
+                )
+                """
+            )
+            con.commit()
+
+            # 기존 DB에 컬럼이 없을 수 있어 안전하게 보강
+            self._ensure_db_columns(con)
+
+            with open(local_csv_path, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                # 필수 컬럼 체크(느슨하게 허용)
+                fieldnames = {c.strip() for c in (reader.fieldnames or [])}
+                if "file_path" not in fieldnames:
+                    self.finished_signal.emit(
+                        False, 0, "CSV에 'file_path' 컬럼이 없습니다."
+                    )
+                    con.close()
+                    return
+
+                batch = []
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                for row in reader:
+                    raw_path = (row.get("file_path") or "").strip()
+                    if not raw_path:
+                        continue
+                    abs_path = self._to_abs_path(raw_path)
+
+                    song_key = (row.get("song_key") or "").strip()
+                    lyrics = (row.get("lyrics") or "").strip()
+                    updated_at = (row.get("updated_at") or "").strip() or now
+                    updated_by = (row.get("updated_by") or "").strip()
+
+                    batch.append((abs_path, song_key, lyrics, updated_at, updated_by))
+                if batch:
+                    # 로컬에서 아직 중앙에 업로드하지 않은(dirty=1) 항목은 덮어쓰지 않도록 보호합니다.
+                    for rec in batch:
+                        cur.execute(
+                            """
+                            INSERT INTO song_metadata (file_path, song_key, lyrics, updated_at, updated_by, dirty)
+                            VALUES (?, ?, ?, ?, ?, 0)
+                            ON CONFLICT(file_path) DO UPDATE SET
+                                song_key=excluded.song_key,
+                                lyrics=excluded.lyrics,
+                                updated_at=excluded.updated_at,
+                                updated_by=excluded.updated_by
+                            WHERE COALESCE(song_metadata.dirty,0)=0
+                            """,
+                            rec,
+                        )
+                    con.commit()
+                    updated_rows = len(batch)
+
+            con.close()
+
+            self.finished_signal.emit(
+                True, updated_rows, f"DB 동기화 완료: {updated_rows}건 반영"
+            )
+
+        except Exception as e:
+            self.finished_signal.emit(False, 0, f"DB 동기화 오류: {str(e)}")
+
+
+# --- [로컬 -> 중앙(스프레드시트) 업로드 스레드] ---
+class MetadataUploadThread(QThread):
+    """로컬 DB에서 dirty=1 인 항목을 중앙 스프레드시트에 upsert(행 업데이트/추가)합니다."""
+
+    log_signal = Signal(str)
+    finished_signal = Signal(bool, int, str)
+
+    def __init__(
+        self,
+        ws_helper: GoogleWorkspaceSync,
+        sheet_name: str,
+        db_path: str,
+        sheet_music_path: str,
+        editor_name: str,
+    ):
+        super().__init__()
+        self.ws_helper = ws_helper
+        self.sheet_name = sheet_name
+        self.db_path = db_path
+        self.sheet_music_path = sheet_music_path
+        self.editor_name = editor_name or ""
+
+    def _ensure_db_columns(self, con: sqlite3.Connection):
+        cur = con.cursor()
+        cur.execute("PRAGMA table_info(song_metadata)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "updated_at" not in cols:
+            cur.execute("ALTER TABLE song_metadata ADD COLUMN updated_at TEXT")
+        if "updated_by" not in cols:
+            cur.execute("ALTER TABLE song_metadata ADD COLUMN updated_by TEXT")
+        if "dirty" not in cols:
+            cur.execute("ALTER TABLE song_metadata ADD COLUMN dirty INTEGER DEFAULT 0")
+        con.commit()
+
+    def _to_rel_path(self, abs_path: str) -> str:
+        if not abs_path:
+            return ""
+        try:
+            base = os.path.normpath(self.sheet_music_path)
+            p = os.path.normpath(abs_path)
+            if p.lower().startswith(base.lower()):
+                rel = os.path.relpath(p, base)
+            else:
+                rel = p
+            return rel.replace(os.sep, "/")
+        except Exception:
+            return abs_path.replace(os.sep, "/")
+
+    def run(self):
+        con = None
+        try:
+            self.log_signal.emit("Google Drive/Sheets 연결 중...")
+            if not self.ws_helper.connect():
+                self.finished_signal.emit(
+                    False, 0, "구글 인증 실패: service_account.json 확인"
+                )
+                return
+
+            self.log_signal.emit(f"중앙 스프레드시트 찾는 중: {self.sheet_name}")
+            item = self.ws_helper.find_file_in_folder_by_name(self.sheet_name)
+            if not item:
+                self.finished_signal.emit(
+                    False,
+                    0,
+                    f"Drive 폴더에서 '{self.sheet_name}' 파일을 찾을 수 없습니다.",
+                )
+                return
+
+            mime = item.get("mimeType", "")
+            if mime != "application/vnd.google-apps.spreadsheet":
+                self.finished_signal.emit(
+                    False,
+                    0,
+                    f"'{self.sheet_name}' 파일이 스프레드시트가 아닙니다. (mimeType={mime})",
+                )
+                return
+
+            spreadsheet_id = item["id"]
+            tab_title = self.ws_helper.get_first_sheet_title(spreadsheet_id)
+
+            con = sqlite3.connect(self.db_path)
+            cur = con.cursor()
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS song_metadata (
+                    file_path TEXT PRIMARY KEY,
+                    song_key TEXT,
+                    lyrics TEXT,
+                    updated_at TEXT,
+                    updated_by TEXT,
+                    dirty INTEGER DEFAULT 0
+                )
+                """
+            )
+            con.commit()
+            self._ensure_db_columns(con)
+
+            cur.execute(
+                """
+                SELECT file_path, song_key, lyrics, COALESCE(updated_at,''), COALESCE(updated_by,'')
+                FROM song_metadata
+                WHERE COALESCE(dirty,0)=1
+                """
+            )
+            local_rows = cur.fetchall()
+            if not local_rows:
+                self.finished_signal.emit(
+                    True, 0, "업로드할 변경사항이 없습니다. (dirty=1 항목 없음)"
+                )
+                con.close()
+                return
+
+            self.log_signal.emit("중앙 시트 읽는 중(기존 데이터 확인)...")
+            header = ["file_path", "song_key", "lyrics", "updated_at", "updated_by"]
+            rng = f"{tab_title}!A:E"
+            resp = (
+                self.ws_helper.sheets.spreadsheets()
+                .values()
+                .get(spreadsheetId=spreadsheet_id, range=rng)
+                .execute()
+            )
+            values = resp.get("values", [])
+
+            if not values:
+                self.log_signal.emit("중앙 시트가 비어있어 헤더를 생성합니다.")
+                self.ws_helper.sheets.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"{tab_title}!A1:E1",
+                    valueInputOption="RAW",
+                    body={"values": [header]},
+                ).execute()
+                values = [header]
+
+            existing_map = {}
+            for idx_row, r in enumerate(values[1:], start=2):
+                if len(r) >= 1 and str(r[0]).strip():
+                    existing_map[str(r[0]).strip()] = idx_row
+
+            updates = []
+            appends = []
+            changed_abs_paths = []
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            for abs_path, song_key, lyrics, updated_at, updated_by in local_rows:
+                rel_path = self._to_rel_path(abs_path)
+                up_at = (updated_at or "").strip() or now
+                up_by = (updated_by or "").strip() or self.editor_name
+                record = [
+                    rel_path,
+                    (song_key or "").strip(),
+                    (lyrics or "").strip(),
+                    up_at,
+                    up_by,
+                ]
+
+                if rel_path in existing_map:
+                    row_no = existing_map[rel_path]
+                    updates.append((row_no, record))
+                else:
+                    appends.append(record)
+
+                changed_abs_paths.append(abs_path)
+
+            written = 0
+            if updates:
+                self.log_signal.emit(f"중앙 시트 업데이트: {len(updates)}건")
+                data = [
+                    {"range": f"{tab_title}!A{row_no}:E{row_no}", "values": [record]}
+                    for row_no, record in updates
+                ]
+                self.ws_helper.sheets.spreadsheets().values().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"valueInputOption": "RAW", "data": data},
+                ).execute()
+                written += len(updates)
+
+            if appends:
+                self.log_signal.emit(f"중앙 시트 추가: {len(appends)}건")
+                self.ws_helper.sheets.spreadsheets().values().append(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"{tab_title}!A:E",
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": appends},
+                ).execute()
+                written += len(appends)
+
+            self.log_signal.emit("로컬 DB 상태 업데이트(dirty=0)...")
+            cur.executemany(
+                "UPDATE song_metadata SET dirty=0 WHERE file_path=?",
+                [(p,) for p in changed_abs_paths],
+            )
+            con.commit()
+            con.close()
+
+            self.finished_signal.emit(
+                True, written, f"중앙 업로드 완료: {written}건 반영"
+            )
+
+        except Exception as e:
+            try:
+                if con:
+                    con.close()
+            except Exception:
+                pass
+            self.finished_signal.emit(False, 0, f"중앙 업로드 오류: {str(e)}")
+
+
 # --- [메인 윈도우 클래스] ---
 class PraiseSheetViewer(QMainWindow):
     def __init__(self):
@@ -543,6 +976,22 @@ class PraiseSheetViewer(QMainWindow):
             self.btn_sync_drive.setToolTip(
                 "Google API 라이브러리가 설치되지 않았습니다."
             )
+
+        # 공동작업 메타데이터(DB) 동기화
+        self.btn_sync_db = QPushButton("DB 동기화")
+        self.btn_sync_db.setFixedWidth(90)
+        self.btn_sync_db.clicked.connect(self.run_db_sync)
+        if not GOOGLE_LIB_AVAILABLE:
+            self.btn_sync_db.setEnabled(False)
+            self.btn_sync_db.setToolTip("Google API 라이브러리가 설치되지 않았습니다.")
+
+        # 로컬 입력값을 중앙 스프레드시트로 업로드
+        self.btn_push_db = QPushButton("중앙 업로드")
+        self.btn_push_db.setFixedWidth(90)
+        self.btn_push_db.clicked.connect(self.run_db_push)
+        if not GOOGLE_LIB_AVAILABLE:
+            self.btn_push_db.setEnabled(False)
+            self.btn_push_db.setToolTip("Google API 라이브러리가 설치되지 않았습니다.")
 
         path_layout = QHBoxLayout()
         path_layout.addWidget(QLabel("악보 폴더:"))
@@ -704,15 +1153,15 @@ class PraiseSheetViewer(QMainWindow):
         self.tree_title = QLabel("악보 선택")
         self.tree_title.setObjectName("panelTitle")
         self.tree_title.setFont(title_font)
-        self.tree_title.setAlignment(Qt.AlignCenter)
+        self.tree_title.setAlignment(Qt.AlignLeft)
         self.preview_title = QLabel("악보 미리보기")
         self.preview_title.setObjectName("panelTitle")
         self.preview_title.setFont(title_font)
-        self.preview_title.setAlignment(Qt.AlignCenter)
+        self.preview_title.setAlignment(Qt.AlignLeft)
         self.list_title = QLabel("선택된 찬양 리스트")
         self.list_title.setObjectName("panelTitle")
         self.list_title.setFont(title_font)
-        self.list_title.setAlignment(Qt.AlignCenter)
+        self.list_title.setAlignment(Qt.AlignLeft)
 
         # --- 중앙 패널 ---
         self.preview_label = QLabel("파일을 선택하여 미리보세요.")
@@ -770,6 +1219,15 @@ class PraiseSheetViewer(QMainWindow):
         inspector_layout.addRow("곡 Key:", self.inspector_key_combo)
         inspector_layout.addRow(lyrics_label_layout)
         inspector_layout.addRow(self.inspector_lyrics_edit)
+        db_buttons_layout = QHBoxLayout()
+        db_buttons_layout.addStretch()  # ← 먼저 넣기 (빈 공간이 왼쪽으로)
+        db_buttons_layout.addWidget(self.btn_sync_db)
+        db_buttons_layout.addWidget(self.btn_push_db)
+        self.btn_sync_db.setMinimumSize(120, 36)
+        self.btn_push_db.setMinimumSize(120, 36)
+        inspector_layout.addRow(db_buttons_layout)
+
+        self.center_splitter = QSplitter(Qt.Vertical)
 
         self.center_splitter = QSplitter(Qt.Vertical)
         self.center_splitter.addWidget(preview_widget)
@@ -819,7 +1277,8 @@ class PraiseSheetViewer(QMainWindow):
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         playlist_title = QLabel("플레이리스트")
         playlist_title.setFont(QFont("맑은 고딕", 12, QFont.Bold))
-        playlist_title.setAlignment(Qt.AlignCenter)
+        playlist_title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        playlist_title.setAlignment(Qt.AlignLeft)
         bottom_layout.addWidget(playlist_title)
         bottom_layout.addLayout(playlist_path_layout)
         bottom_layout.addLayout(playlist_search_layout)
@@ -1005,6 +1464,7 @@ class PraiseSheetViewer(QMainWindow):
 
         self.btn_change_folder.setObjectName("secondary")
         self.btn_sync_drive.setObjectName("secondary")
+        self.btn_sync_db.setObjectName("secondary")
         self.btn_change_playlist_folder.setObjectName("secondary")
         self.btn_add_selected.setObjectName("secondary")
         self.btn_add_favorite.setObjectName("secondary")
@@ -1166,10 +1626,24 @@ class PraiseSheetViewer(QMainWindow):
                 CREATE TABLE IF NOT EXISTS song_metadata (
                     file_path TEXT PRIMARY KEY,
                     song_key TEXT,
-                    lyrics TEXT
+                    lyrics TEXT,
+                    updated_at TEXT,
+                    updated_by TEXT,
+                    dirty INTEGER DEFAULT 0
                 )
             """
             )
+            # 기존 DB에서 컬럼이 부족한 경우를 대비해 보강
+            cur.execute("PRAGMA table_info(song_metadata)")
+            cols = {row[1] for row in cur.fetchall()}
+            if "updated_at" not in cols:
+                cur.execute("ALTER TABLE song_metadata ADD COLUMN updated_at TEXT")
+            if "updated_by" not in cols:
+                cur.execute("ALTER TABLE song_metadata ADD COLUMN updated_by TEXT")
+            if "dirty" not in cols:
+                cur.execute(
+                    "ALTER TABLE song_metadata ADD COLUMN dirty INTEGER DEFAULT 0"
+                )
             con.commit()
             con.close()
         except Exception as e:
@@ -1196,12 +1670,20 @@ class PraiseSheetViewer(QMainWindow):
         try:
             con = sqlite3.connect(self.db_path)
             cur = con.cursor()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            editor = getattr(self, "editor_name", "") or ""
             cur.execute(
                 """
-                INSERT OR REPLACE INTO song_metadata (file_path, song_key, lyrics)
-                VALUES (?, ?, ?)
+                INSERT INTO song_metadata (file_path, song_key, lyrics, updated_at, updated_by, dirty)
+                VALUES (?, ?, ?, ?, ?, 1)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    song_key=excluded.song_key,
+                    lyrics=excluded.lyrics,
+                    updated_at=excluded.updated_at,
+                    updated_by=excluded.updated_by,
+                    dirty=1
             """,
-                (file_path, song_key, lyrics),
+                (file_path, song_key, lyrics, now, editor),
             )
             con.commit()
             con.close()
@@ -1579,7 +2061,7 @@ class PraiseSheetViewer(QMainWindow):
 
             /* ===== Lists / Trees ===== */
             QTreeView::item, QListWidget::item {{
-                padding: 6px 8px;
+                padding: 4px 4px;
                 border-radius: 6px;
             }}
             QTreeView::item:hover, QListWidget::item:hover {{
@@ -1748,6 +2230,12 @@ class PraiseSheetViewer(QMainWindow):
         self.scroll_sensitivity = 30
         self.logo_image_path = ""
         self.drive_folder_id = "1fFN1w070XmwIHhbNxfuUzNXY7tAwWSzC"
+        # Drive 폴더 내 메타데이터 CSV 파일명(공동작업용)
+        self.metadata_csv_name = "song_metadata.csv"
+        # 중앙 원본 스프레드시트 파일명(공동작업용)
+        self.metadata_sheet_name = "song_metadata"
+        # 로컬 편집자 이름(업로드 시 기록)
+        self.editor_name = os.environ.get("USERNAME") or os.environ.get("USER") or ""
 
         try:
             if not os.path.exists(self.sheet_music_path):
@@ -1775,6 +2263,13 @@ class PraiseSheetViewer(QMainWindow):
                     self.logo_image_path = settings.get("logo_image_path", "")
 
                     self.drive_folder_id = "1fFN1w070XmwIHhbNxfuUzNXY7tAwWSzC"
+                    self.metadata_csv_name = settings.get(
+                        "metadata_csv_name", self.metadata_csv_name
+                    )
+                    self.metadata_sheet_name = settings.get(
+                        "metadata_sheet_name", self.metadata_sheet_name
+                    )
+                    self.editor_name = settings.get("editor_name", self.editor_name)
             else:
                 self.save_settings()
         except (json.JSONDecodeError, TypeError, OSError) as e:
@@ -1790,6 +2285,9 @@ class PraiseSheetViewer(QMainWindow):
             "scroll_sensitivity": self.scroll_sensitivity,
             "logo_image_path": self.logo_image_path,
             "drive_folder_id": self.drive_folder_id,
+            "metadata_csv_name": self.metadata_csv_name,
+            "metadata_sheet_name": self.metadata_sheet_name,
+            "editor_name": self.editor_name,
         }
         try:
             with open(self.settings_file, "w", encoding="utf-8") as f:
@@ -2581,6 +3079,120 @@ class PraiseSheetViewer(QMainWindow):
         # 5. 시작
         self.sync_thread.start()
 
+    def run_db_sync(self):
+        """Drive에 있는 metadata CSV를 내려받아 로컬 song_metadata.db를 갱신합니다."""
+        # 1. 사전 체크
+        key_file = os.path.join(self.app_dir, "service_account.json")
+        if not os.path.exists(key_file):
+            QMessageBox.critical(
+                self,
+                "설정 오류",
+                f"서비스 계정 키 파일(service_account.json)이 없습니다.\n"
+                f"프로그램 폴더에 키 파일을 넣어주세요.\n경로: {self.app_dir}",
+            )
+            return
+
+        if not self.drive_folder_id or "여기에" in self.drive_folder_id:
+            QMessageBox.warning(
+                self,
+                "설정 확인",
+                "설정 파일(settings.json) 또는 코드의 load_settings에\n구글 드라이브 폴더 ID가 올바른지 확인해주세요.",
+            )
+            return
+
+        if not getattr(self, "metadata_csv_name", ""):
+            QMessageBox.warning(
+                self,
+                "설정 확인",
+                "metadata_csv_name 설정이 비어있습니다. (기본: song_metadata.csv)",
+            )
+            return
+
+        # 2. UI 준비 (다이얼로그 표시)
+        self.sync_dialog = SyncProgressDialog(self)
+        self.sync_dialog.setWindowTitle("DB 동기화")
+        self.sync_dialog.status_label.setText("메타데이터 동기화 준비 중...")
+        self.sync_dialog.show()
+
+        # 3. 워커 준비
+        syncer_helper = GoogleDriveSync(
+            key_file, self.sheet_music_path, self.drive_folder_id, self.app_dir
+        )
+        self.sync_thread = MetadataSyncThread(
+            syncer_helper, self.metadata_csv_name, self.db_path, self.sheet_music_path
+        )
+
+        # 4. 시그널 연결
+        self.sync_thread.log_signal.connect(self.sync_dialog.append_log)
+        self.sync_thread.finished_signal.connect(self.on_db_sync_finished)
+
+        # 5. 시작
+        self.sync_thread.start()
+
+    def run_db_push(self):
+        """로컬 DB에서 수정한(dirty=1) 메타데이터를 중앙 스프레드시트로 업로드합니다."""
+        key_file = os.path.join(self.app_dir, "service_account.json")
+        if not os.path.exists(key_file):
+            QMessageBox.critical(
+                self,
+                "설정 오류",
+                f"서비스 계정 키 파일(service_account.json)이 없습니다.\n경로: {self.app_dir}",
+            )
+            return
+
+        if not self.drive_folder_id or "여기에" in self.drive_folder_id:
+            QMessageBox.warning(
+                self, "설정 확인", "drive_folder_id 설정을 확인해주세요."
+            )
+            return
+
+        if not getattr(self, "metadata_sheet_name", ""):
+            QMessageBox.warning(
+                self,
+                "설정 확인",
+                "metadata_sheet_name 설정이 비어있습니다. (기본: song_metadata)",
+            )
+            return
+
+        self.sync_dialog = SyncProgressDialog(self)
+        self.sync_dialog.setWindowTitle("중앙 업로드")
+        self.sync_dialog.status_label.setText("중앙 스프레드시트로 업로드 준비 중...")
+        self.sync_dialog.show()
+
+        ws_helper = GoogleWorkspaceSync(key_file, self.drive_folder_id, self.app_dir)
+        self.sync_thread = MetadataUploadThread(
+            ws_helper,
+            self.metadata_sheet_name,
+            self.db_path,
+            self.sheet_music_path,
+            getattr(self, "editor_name", "") or "",
+        )
+
+        self.sync_thread.log_signal.connect(self.sync_dialog.append_log)
+        self.sync_thread.finished_signal.connect(self.on_db_push_finished)
+        self.sync_thread.start()
+
+    def on_db_push_finished(self, success, uploaded_rows, msg):
+        self.sync_dialog.finish_sync(success, msg)
+        self.sync_dialog.append_log("-" * 30)
+        self.sync_dialog.append_log(f"결과: {msg}")
+        if success:
+            self.sync_dialog.append_log(f"-> {uploaded_rows}건 업로드")
+        self.status_bar_label.setText(msg)
+
+    def on_db_sync_finished(self, success, updated_rows, msg):
+        self.sync_dialog.finish_sync(success, msg)
+        self.sync_dialog.append_log("-" * 30)
+        self.sync_dialog.append_log(f"결과: {msg}")
+        if success:
+            self.sync_dialog.append_log(f"-> {updated_rows}건 반영")
+            # 검색/키 필터에 바로 반영
+            self.metadata_cache = self.load_all_metadata_from_db()
+            self.proxy_model.metadata_cache = self.metadata_cache
+            self.proxy_model.invalidate()
+            self.load_metadata_to_inspector(self.current_preview_path)
+        self.status_bar_label.setText(msg)
+
     def on_sync_finished(self, success, download_count, db_updated, msg):
         self.sync_dialog.finish_sync(success, msg)
         self.sync_dialog.append_log("-" * 30)
@@ -2834,12 +3446,30 @@ class FullScreenViewer(QWidget):
         view_size = self.scroll_area.viewport().size()
 
         if is_intermission:
-            # --- 인터미션 모드: 화면 중앙에 꽉 차게 (KeepAspectRatio) ---
+            # 화면을 가득 채우되, 비율 유지 + 넘치는 부분 crop
             scaled = pixmap.scaled(
-                view_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                view_size,
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation,
             )
-            self.image_label.setPixmap(scaled)
+
+            # 중앙 기준으로 crop
+            x = (scaled.width() - view_size.width()) // 2
+            y = (scaled.height() - view_size.height()) // 2
+            cropped = scaled.copy(
+                x,
+                y,
+                view_size.width(),
+                view_size.height(),
+            )
+
+            self.image_label.setPixmap(cropped)
             self.image_label.setAlignment(Qt.AlignCenter)
+
+            # 스크롤 완전 제거
+            self.scroll_area.verticalScrollBar().setValue(0)
+            self.scroll_area.horizontalScrollBar().setValue(0)
+            self.next_song_label.hide()
             # 인터미션은 스크롤 없이
             self.scroll_area.verticalScrollBar().setValue(0)
             self.scroll_area.horizontalScrollBar().setValue(0)
