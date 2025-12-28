@@ -949,12 +949,20 @@ class PraiseSheetViewer(QMainWindow):
         self.init_monitor_selection()
 
         dual_control_layout = QVBoxLayout()
-        dual_control_layout.setSpacing(5)
+        dual_control_layout.setSpacing(8)
+
+        # 쇼 시작 버튼 (한 줄)
+        start_buttons_layout = QHBoxLayout()
+        start_buttons_layout.addWidget(self.btn_start_from_first)
+        start_buttons_layout.addWidget(self.btn_start_from_current)
+
+        dual_control_layout.addLayout(start_buttons_layout)
+
         dual_control_layout.addWidget(self.btn_toggle_dual_viewer)
         dual_control_layout.addWidget(self.monitor_combo)
         dual_control_layout.addLayout(screen_control_layout)
 
-        dual_group = QGroupBox("쇼 설정")
+        dual_group = QGroupBox("쇼 하기")
         dual_group.setLayout(dual_control_layout)
 
         # --- 버튼 그룹핑 ---
@@ -970,11 +978,6 @@ class PraiseSheetViewer(QMainWindow):
         button_layout2.addWidget(self.btn_insert_intermission)  # [추가]
         button_layout2.addWidget(self.btn_save_list)
         button_layout2.addWidget(self.btn_load_list)
-
-        show_layout = QVBoxLayout()
-        show_layout.setSpacing(5)
-        show_layout.addWidget(self.btn_start_from_first)
-        show_layout.addWidget(self.btn_start_from_current)
 
         shortcut_group_box = QGroupBox("쇼 화면 단축키 안내")
         shortcut_layout = QVBoxLayout(shortcut_group_box)
@@ -1029,7 +1032,6 @@ class PraiseSheetViewer(QMainWindow):
         right_layout = QVBoxLayout()
         right_layout.addWidget(self.list_title)
         right_layout.addWidget(self.list_widget, 1)
-        right_layout.addLayout(show_layout)
         right_layout.addLayout(button_layout1)
         right_layout.addLayout(button_layout2)
         right_layout.addWidget(dual_group)
@@ -1474,16 +1476,6 @@ class PraiseSheetViewer(QMainWindow):
 
     def get_themes(self):
         return {
-            "그린": {
-                "base": "#F0FFF0",
-                "window": "#E6F5E6",
-                "text": "#003300",
-                "button": "#90EE90",
-                "button_text": "#003300",
-                "highlight": "#3CB371",
-                "highlight_text": "#FFFFFF",
-                "border": "#2E8B57",
-            },
             "기본 (밝게)": {
                 "base": "#FFFFFF",
                 "window": "#FFFFFF",
@@ -1493,6 +1485,16 @@ class PraiseSheetViewer(QMainWindow):
                 "highlight": "#D3D3D3",
                 "highlight_text": "#000000",
                 "border": "#CCCCCC",
+            },
+            "그린": {
+                "base": "#F0FFF0",
+                "window": "#E6F5E6",
+                "text": "#003300",
+                "button": "#90EE90",
+                "button_text": "#003300",
+                "highlight": "#3CB371",
+                "highlight_text": "#FFFFFF",
+                "border": "#2E8B57",
             },
             "어둡게": {
                 "base": "#3E3E3E",
@@ -1742,7 +1744,7 @@ class PraiseSheetViewer(QMainWindow):
         self.sheet_music_path = "c:\\songs"
         self.playlist_path = "c:\\songs\\playlist"
         self.current_theme = "기본 (밝게)"
-        self.initial_zoom_percentage = 80
+        self.initial_zoom_percentage = 60
         self.scroll_sensitivity = 30
         self.logo_image_path = ""
         self.drive_folder_id = "1fFN1w070XmwIHhbNxfuUzNXY7tAwWSzC"
@@ -2784,7 +2786,7 @@ class FullScreenViewer(QWidget):
 
         self.fade_anim = QPropertyAnimation(self.fade_effect, b"opacity", self)
         self.fade_anim.setEasingCurve(QEasingCurve.InOutQuad)
-        self.fade_anim.setDuration(180)
+        self.fade_anim.setDuration(300)
 
         self.scroll_area.viewport().installEventFilter(self)
 
@@ -2995,21 +2997,33 @@ class FullScreenViewer(QWidget):
         self.update_next_song_label()
 
     def toggle_black_screen(self):
-        if self.main_layout.currentWidget() == self.black_screen_widget:
-            self.main_layout.setCurrentWidget(self.scroll_area)
-            self.load_image_with_current_zoom()  # 상태 복구
-        else:
-            self.main_layout.setCurrentWidget(self.black_screen_widget)
-            self.next_song_label.hide()
+        def _do_switch():
+            if self.main_layout.currentWidget() == self.black_screen_widget:
+                # 블랙 -> 악보로 복귀
+                self.main_layout.setCurrentWidget(self.scroll_area)
+                self.load_image_with_current_zoom()  # 상태 복구
+            else:
+                # 악보 -> 블랙
+                self.main_layout.setCurrentWidget(self.black_screen_widget)
+                self.next_song_label.hide()
+
+        # 페이드 적용
+        self._run_brightness_transition(_do_switch)
 
     def toggle_logo_screen(self):
-        if self.main_layout.currentWidget() == self.logo_screen_widget:
-            self.main_layout.setCurrentWidget(self.scroll_area)
-            self.load_image_with_current_zoom()
-        else:
-            self.main_layout.setCurrentWidget(self.logo_screen_widget)
-            self.display_logo_scaled()
-            self.next_song_label.hide()
+        def _do_switch():
+            if self.main_layout.currentWidget() == self.logo_screen_widget:
+                # 로고 -> 악보로 복귀
+                self.main_layout.setCurrentWidget(self.scroll_area)
+                self.load_image_with_current_zoom()
+            else:
+                # 악보 -> 로고
+                self.main_layout.setCurrentWidget(self.logo_screen_widget)
+                self.display_logo_scaled()
+                self.next_song_label.hide()
+
+        # 페이드 적용
+        self._run_brightness_transition(_do_switch)
 
     def update_next_song_label(self):
         if self.main_layout.currentWidget() != self.scroll_area:
@@ -3064,13 +3078,13 @@ class FullScreenViewer(QWidget):
             return
 
         if self.show_ended:
-            if event.key() in (Qt.Key_PageDown, Qt.Key_Right):
+            if event.key() in (Qt.Key_PageDown, Qt.Key_Right, Qt.Key_Space):
                 self.close()
             elif event.key() in (Qt.Key_PageUp, Qt.Key_Left):
                 self.return_to_last_slide()
             return
 
-        if event.key() in (Qt.Key_PageDown, Qt.Key_Right):
+        if event.key() in (Qt.Key_PageDown, Qt.Key_Right, Qt.Key_Space):
             if self.current_index < len(self.playlist_data) - 1:
                 self._navigate_to(self.current_index + 1)
             else:
