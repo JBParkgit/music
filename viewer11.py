@@ -978,7 +978,7 @@ class PraiseSheetViewer(QMainWindow):
             )
 
         # 공동작업 메타데이터(DB) 동기화
-        self.btn_sync_db = QPushButton("DB 동기화")
+        self.btn_sync_db = QPushButton("DB 내려받기")
         self.btn_sync_db.setFixedWidth(90)
         self.btn_sync_db.clicked.connect(self.run_db_sync)
         if not GOOGLE_LIB_AVAILABLE:
@@ -986,7 +986,7 @@ class PraiseSheetViewer(QMainWindow):
             self.btn_sync_db.setToolTip("Google API 라이브러리가 설치되지 않았습니다.")
 
         # 로컬 입력값을 중앙 스프레드시트로 업로드
-        self.btn_push_db = QPushButton("중앙 업로드")
+        self.btn_push_db = QPushButton("DB 올리기")
         self.btn_push_db.setFixedWidth(90)
         self.btn_push_db.clicked.connect(self.run_db_push)
         if not GOOGLE_LIB_AVAILABLE:
@@ -2233,7 +2233,7 @@ class PraiseSheetViewer(QMainWindow):
         # Drive 폴더 내 메타데이터 CSV 파일명(공동작업용)
         self.metadata_csv_name = "song_metadata.csv"
         # 중앙 원본 스프레드시트 파일명(공동작업용)
-        self.metadata_sheet_name = "song_metadata"
+        self.metadata_sheet_name = "song_metadata.csv"
         # 로컬 편집자 이름(업로드 시 기록)
         self.editor_name = os.environ.get("USERNAME") or os.environ.get("USER") or ""
 
@@ -3334,9 +3334,7 @@ class FullScreenViewer(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         palette = self.scroll_area.palette()
-        palette.setColor(
-            QPalette.Window, QColor("white")
-        )  # 배경 검정으로 통일 (인터미션 시 보기 좋게)
+        palette.setColor(QPalette.Window, QColor("white"))
         self.scroll_area.setPalette(palette)
         self.scroll_area.setAutoFillBackground(True)
 
@@ -3438,6 +3436,12 @@ class FullScreenViewer(QWidget):
         path = current_data["path"]
         is_intermission = current_data["is_intermission"]
 
+        # --- [배경색 동적 변경 추가] ---
+        bg_color = "black" if is_intermission else "white"
+        self.scroll_area.setStyleSheet(f"background-color: {bg_color}; border: none;")
+        self.image_label.setStyleSheet(f"background-color: {bg_color};")
+        # -----------------------------
+
         pixmap = QPixmap(path)
         if pixmap.isNull():
             self.image_label.setText("이미지를 불러올 수 없습니다.")
@@ -3466,10 +3470,6 @@ class FullScreenViewer(QWidget):
             self.image_label.setPixmap(cropped)
             self.image_label.setAlignment(Qt.AlignCenter)
 
-            # 스크롤 완전 제거
-            self.scroll_area.verticalScrollBar().setValue(0)
-            self.scroll_area.horizontalScrollBar().setValue(0)
-            self.next_song_label.hide()
             # 인터미션은 스크롤 없이
             self.scroll_area.verticalScrollBar().setValue(0)
             self.scroll_area.horizontalScrollBar().setValue(0)
@@ -3492,6 +3492,12 @@ class FullScreenViewer(QWidget):
         current_data = self.playlist_data[self.current_index]
         path = current_data["path"]
         is_intermission = current_data["is_intermission"]
+
+        # --- [배경색 동적 변경 추가] ---
+        bg_color = "black" if is_intermission else "white"
+        self.scroll_area.setStyleSheet(f"background-color: {bg_color}; border: none;")
+        self.image_label.setStyleSheet(f"background-color: {bg_color};")
+        # -----------------------------
 
         pixmap = QPixmap(path)
         if pixmap.isNull():
@@ -3687,16 +3693,31 @@ class FullScreenViewer(QWidget):
         else:
             self.next_song_label.hide()
 
+    # --- [추가] 블랙/로고 모드에서 복귀하는 헬퍼 메서드 ---
+    def _return_from_overlay(self):
+        """블랙 혹은 로고 화면에서 원래 악보 쇼 화면으로 복귀합니다."""
+        if self._is_transitioning:
+            return
+
+        def _do_switch():
+            self.main_layout.setCurrentWidget(self.scroll_area)
+            self.load_image_with_current_zoom()
+
+        # 기존에 구현된 페이드 애니메이션과 함께 복귀
+        self._run_brightness_transition(_do_switch)
+
+    # --- [수정] 키 입력 이벤트 핸들러 ---
     def keyPressEvent(self, event):
+        # 현재 화면이 블랙 스크린(index 2) 혹은 로고 스크린(index 3)인지 확인
+        current_widget = self.main_layout.currentWidget()
+        if current_widget in [self.black_screen_widget, self.logo_screen_widget]:
+            # Esc 키를 포함하여 어떤 키를 눌러도 쇼 화면으로 복귀합니다.
+            self._return_from_overlay()
+            return
+
+        # 아래는 기존 로직 유지
         if event.key() == Qt.Key_Escape:
-            if self.main_layout.currentWidget() in [
-                self.black_screen_widget,
-                self.logo_screen_widget,
-            ]:
-                self.main_layout.setCurrentWidget(self.scroll_area)
-                self.load_image_with_current_zoom()
-            else:
-                self.close()
+            self.close()
             return
 
         if event.key() == Qt.Key_B:
@@ -3714,6 +3735,7 @@ class FullScreenViewer(QWidget):
                 self.return_to_last_slide()
             return
 
+        # 페이지 이동 및 기타 제어
         if event.key() in (Qt.Key_PageDown, Qt.Key_Right, Qt.Key_Space):
             if self.current_index < len(self.playlist_data) - 1:
                 self._navigate_to(self.current_index + 1)
@@ -3722,8 +3744,6 @@ class FullScreenViewer(QWidget):
         elif event.key() in (Qt.Key_PageUp, Qt.Key_Left):
             if self.current_index > 0:
                 self._navigate_to(self.current_index - 1)
-            else:
-                self.show_first_alert()
 
         elif event.key() == Qt.Key_Down:
             v_scroll_bar = self.scroll_area.verticalScrollBar()
@@ -3752,7 +3772,15 @@ class FullScreenViewer(QWidget):
         elif event.key() == Qt.Key_0:
             self.fit_to_height()
 
+    # --- [수정] 마우스 클릭 이벤트 핸들러 ---
     def mousePressEvent(self, event):
+        # 현재 화면이 블랙 혹은 로고 모드인 경우 클릭 시 복귀
+        current_widget = self.main_layout.currentWidget()
+        if current_widget in [self.black_screen_widget, self.logo_screen_widget]:
+            self._return_from_overlay()
+            return
+
+        # 아래는 기존 로직 유지
         if self.show_ended:
             if event.button() == Qt.LeftButton:
                 self.close()
@@ -3768,8 +3796,6 @@ class FullScreenViewer(QWidget):
         elif event.button() == Qt.RightButton:
             if self.current_index > 0:
                 self._navigate_to(self.current_index - 1)
-            else:
-                self.show_first_alert()
 
     def eventFilter(self, obj, event):
         if obj == self.scroll_area.viewport() and event.type() == QEvent.Wheel:
