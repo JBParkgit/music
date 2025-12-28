@@ -460,7 +460,7 @@ class SyncThread(QThread):
 class PraiseSheetViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("물댄동산 악보 뷰어 Pet1 2:9 V2.9")  # 버전 업
+        self.setWindowTitle("물댄동산 악보 뷰어 Pet1 2:9 V3")  # 버전 업
 
         # --- [최적화] 폰트 워밍업 ---
         self.font_warmer = QLabel("⭐ 🎼", self)
@@ -534,8 +534,9 @@ class PraiseSheetViewer(QMainWindow):
         self.btn_change_folder.setFixedWidth(80)
         self.btn_change_folder.clicked.connect(self.change_sheet_music_folder)
 
-        self.btn_sync_drive = QPushButton("☁️ 온라인 악보 받기")
-        self.btn_sync_drive.setFixedWidth(130)
+        self.btn_sync_drive = QPushButton("온라인 악보 받기")
+        self.btn_sync_drive.setMinimumWidth(150)  # 또는 160~180
+        self.btn_sync_drive.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.btn_sync_drive.clicked.connect(self.run_google_sync)
         if not GOOGLE_LIB_AVAILABLE:
             self.btn_sync_drive.setEnabled(False)
@@ -613,7 +614,7 @@ class PraiseSheetViewer(QMainWindow):
 
         self.search_type_combo = QComboBox()
         self.search_type_combo.addItems(["파일이름", "가사"])
-        self.search_type_combo.setFixedWidth(80)
+        self.search_type_combo.setFixedWidth(95)
 
         self.btn_reset_search = QPushButton("초기화")
         self.btn_reset_search.setFixedWidth(80)
@@ -625,9 +626,6 @@ class PraiseSheetViewer(QMainWindow):
         search_layout.addWidget(self.btn_reset_search)
 
         self.btn_launch_capture = QPushButton("📸 악보 수집 도구 실행")
-        self.btn_launch_capture.setStyleSheet(
-            "font-weight: bold; color: #0055aa; padding: 5px;"
-        )
         self.btn_launch_capture.clicked.connect(self.launch_capture_tool)
 
         self.sheet_sort_combo = QComboBox()
@@ -702,14 +700,17 @@ class PraiseSheetViewer(QMainWindow):
         playlist_sort_layout.addWidget(QLabel("정렬:"))
         playlist_sort_layout.addWidget(self.playlist_sort_combo)
 
-        title_font = QFont("맑은 고딕", 16, QFont.Bold)
+        title_font = QFont("맑은 고딕", 14, QFont.Bold)
         self.tree_title = QLabel("악보 선택")
+        self.tree_title.setObjectName("panelTitle")
         self.tree_title.setFont(title_font)
         self.tree_title.setAlignment(Qt.AlignCenter)
         self.preview_title = QLabel("악보 미리보기")
+        self.preview_title.setObjectName("panelTitle")
         self.preview_title.setFont(title_font)
         self.preview_title.setAlignment(Qt.AlignCenter)
         self.list_title = QLabel("선택된 찬양 리스트")
+        self.list_title.setObjectName("panelTitle")
         self.list_title.setFont(title_font)
         self.list_title.setAlignment(Qt.AlignCenter)
 
@@ -859,7 +860,6 @@ class PraiseSheetViewer(QMainWindow):
 
         # [추가] 인터미션 추가 버튼
         self.btn_insert_intermission = QPushButton("☕ 인터미션 추가")
-        self.btn_insert_intermission.setStyleSheet("color: #005500; font-weight: bold;")
         self.btn_insert_intermission.clicked.connect(self.insert_intermission_item)
 
         self.show_title_label = QLabel("쇼 시작")
@@ -872,18 +872,6 @@ class PraiseSheetViewer(QMainWindow):
         self.btn_start_from_current.setShortcut(QKeySequence("Shift+F5"))
         self.btn_start_from_first.clicked.connect(self.start_show)
         self.btn_start_from_current.clicked.connect(self.start_show_from_current)
-
-        # --- 이전/다음 내비게이션 버튼 ---
-        self.btn_select_prev = QPushButton("◀ 이전")
-        self.btn_select_next = QPushButton("다음 ▶")
-        self.btn_select_prev.setStyleSheet("padding: 8px;")
-        self.btn_select_next.setStyleSheet("padding: 8px;")
-        self.btn_select_prev.clicked.connect(self.select_previous_item)
-        self.btn_select_next.clicked.connect(self.select_next_item)
-
-        nav_button_layout = QHBoxLayout()
-        nav_button_layout.addWidget(self.btn_select_prev)
-        nav_button_layout.addWidget(self.btn_select_next)
 
         self.btn_save_list = QPushButton("리스트 저장")
         self.btn_load_list = QPushButton("리스트 불러오기")
@@ -987,7 +975,6 @@ class PraiseSheetViewer(QMainWindow):
         show_layout.setSpacing(5)
         show_layout.addWidget(self.btn_start_from_first)
         show_layout.addWidget(self.btn_start_from_current)
-        show_layout.addLayout(nav_button_layout)
 
         shortcut_group_box = QGroupBox("쇼 화면 단축키 안내")
         shortcut_layout = QVBoxLayout(shortcut_group_box)
@@ -1006,6 +993,38 @@ class PraiseSheetViewer(QMainWindow):
         shortcut_label.setAlignment(Qt.AlignLeft)
         shortcut_layout.addWidget(shortcut_label)
 
+        # --- [디자인 개선] 버튼 역할(ObjectName) 지정 (기능 영향 없음) ---
+        # QSS에서 #primary / #secondary / #danger / #ghost 로 스타일 구분
+        self.btn_show_single.setObjectName("primary")
+        self.btn_start_from_first.setObjectName("primary")
+        self.btn_start_from_current.setObjectName("primary")
+        self.btn_launch_capture.setObjectName("primary")
+
+        self.btn_change_folder.setObjectName("secondary")
+        self.btn_sync_drive.setObjectName("secondary")
+        self.btn_change_playlist_folder.setObjectName("secondary")
+        self.btn_add_selected.setObjectName("secondary")
+        self.btn_add_favorite.setObjectName("secondary")
+        self.btn_remove_favorite.setObjectName("secondary")
+        self.btn_toggle_favorites_view.setObjectName("secondary")
+        self.btn_save_list.setObjectName("secondary")
+        self.btn_load_list.setObjectName("secondary")
+        self.btn_move_top.setObjectName("secondary")
+        self.btn_move_up.setObjectName("secondary")
+        self.btn_move_down.setObjectName("secondary")
+        self.btn_move_bottom.setObjectName("secondary")
+        self.btn_toggle_dual_viewer.setObjectName("secondary")
+        self.btn_insert_intermission.setObjectName("secondary")
+        self.btn_change_logo.setObjectName("secondary")
+        self.btn_reset_search.setObjectName("secondary")
+        self.btn_reset_playlist_search.setObjectName("secondary")
+
+        self.btn_black_screen.setObjectName("ghost")
+        self.btn_logo_screen.setObjectName("ghost")
+
+        self.btn_delete.setObjectName("danger")
+        self.btn_delete_all.setObjectName("danger")
+
         # --- 우측 레이아웃 배치 순서 ---
         right_layout = QVBoxLayout()
         right_layout.addWidget(self.list_title)
@@ -1021,6 +1040,8 @@ class PraiseSheetViewer(QMainWindow):
         right_layout.addWidget(shortcut_group_box)
 
         main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(12)
         main_layout.addLayout(tree_layout, 2)
 
         center_layout = QVBoxLayout()
@@ -1500,30 +1521,216 @@ class PraiseSheetViewer(QMainWindow):
         self.apply_theme(theme_name)
 
     def apply_theme(self, theme_name):
+        """전역 QSS를 적용합니다. (기능 변경 없이 디자인만 개선)"""
         theme = self.themes.get(theme_name, self.themes["기본 (밝게)"])
+
         stylesheet = f"""
-            QWidget {{ background-color: {theme['window']}; color: {theme['text']}; }}
-            QTreeView, QListWidget, QLineEdit, QScrollArea, QGroupBox, QTextEdit, QComboBox {{ background-color: {theme['base']}; border: 1px solid {theme['border']}; }}
-            QTabWidget::pane {{ border-top: 2px solid {theme['border']}; }}
-            QTabBar::tab {{ background: {theme['button']}; color: {theme['button_text']}; border: 1px solid {theme['border']}; border-bottom-color: {theme['border']}; border-top-left-radius: 4px; border-top-right-radius: 4px; padding: 6px; }}
-            QTabBar::tab:selected {{ background: {theme['base']}; color: {theme['text']}; border-bottom-color: {theme['base']}; }}
-            QGroupBox {{ margin-top: 10px; font-weight: bold; }}
-            QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top center; padding: 0 3px; }}
-            QTreeView::item:hover, QListWidget::item:hover {{ background-color: {theme['highlight']}; color: {theme['highlight_text']}; }}
-            QTreeView::item:selected, QListWidget::item:selected {{ background-color: {theme['highlight']}; color: {theme['highlight_text']}; }}
-            QPushButton {{ background-color: {theme['button']}; color: {theme['button_text']}; border-width: 2px; border-style: outset; border-color: {theme['border']}; border-radius: 5px; padding: 5px; }}
-            QPushButton:hover {{ background-color: {theme['highlight']}; color: {theme['highlight_text']}; }}
-            QPushButton:pressed {{ background-color: {theme['base']}; border-style: inset; }}
-            QLabel, QCheckBox {{ color: {theme['text']}; border: none; background-color: transparent; }}
-            QToolTip {{ background-color: {theme['base']}; color: {theme['text']}; border: 1px solid {theme['border']}; }}
-            QDialog {{ background-color: {theme['window']}; }}
+            /* ===== Base ===== */
+            QWidget {{
+                background-color: {theme['window']};
+                color: {theme['text']};
+                font-family: '맑은 고딕';
+                font-size: 10pt;
+            }}
+            QLabel#panelTitle {{
+                font-size: 16pt;
+                font-weight: 800;
+            }}
+            /* ===== Panels / Cards ===== */
+            QTreeView, QListWidget, QLineEdit, QScrollArea, QTextEdit, QPlainTextEdit, QComboBox, QGroupBox {{
+                background-color: {theme['base']};
+                border: 1px solid {theme['border']};
+                border-radius: 8px;
+            }}
+            QGroupBox {{
+                margin-top: 14px;
+                padding: 10px;
+                font-weight: 700;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 6px;
+            }}
+
+            /* ===== Inputs ===== */
+            QLineEdit {{
+                padding: 6px 8px;
+                selection-background-color: {theme['highlight']};
+                selection-color: {theme['highlight_text']};
+            }}
+            QTextEdit, QPlainTextEdit {{
+                padding: 8px;
+            }}
+            QComboBox {{
+                padding: 6px 8px;
+            }}
+            QComboBox::drop-down {{
+                border: 0px;
+                width: 22px;
+            }}
+
+            /* ===== Splitter ===== */
+            QSplitter::handle {{
+                background-color: {theme['window']};
+            }}
+
+            /* ===== Lists / Trees ===== */
+            QTreeView::item, QListWidget::item {{
+                padding: 6px 8px;
+                border-radius: 6px;
+            }}
+            QTreeView::item:hover, QListWidget::item:hover {{
+                background-color: rgba(0, 0, 0, 0.06);
+            }}
+            QTreeView::item:selected, QListWidget::item:selected {{
+                background-color: {theme['highlight']};
+                color: {theme['highlight_text']};
+            }}
+
+            /* ===== Tabs ===== */
+            QTabWidget::pane {{
+                border-top: 1px solid {theme['border']};
+                border-radius: 8px;
+            }}
+            QTabBar::tab {{
+                background: {theme['button']};
+                color: {theme['button_text']};
+                border: 1px solid {theme['border']};
+                border-bottom: none;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                padding: 8px 12px;
+                margin-right: 4px;
+            }}
+            QTabBar::tab:selected {{
+                background: {theme['base']};
+                color: {theme['text']};
+            }}
+
+            /* ===== Buttons (Base) ===== */
+            QPushButton {{
+                background-color: {theme['button']};
+                color: {theme['button_text']};
+                border: 1px solid {theme['border']};
+                border-radius: 8px;
+                padding: 8px 12px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {theme['highlight']};
+                color: {theme['highlight_text']};
+                border-color: {theme['highlight']};
+            }}
+            QPushButton:pressed {{
+                background-color: rgba(0, 0, 0, 0.04);
+            }}
+            QPushButton:disabled {{
+                opacity: 0.6;
+            }}
+
+            /* ===== Buttons by role ===== */
+            QPushButton#primary {{
+                background-color: {theme['highlight']};
+                color: {theme['highlight_text']};
+                border-color: {theme['highlight']};
+            }}
+            QPushButton#primary:hover {{
+                background-color: rgba(0, 0, 0, 0.10);
+                color: {theme['text']};
+                border-color: {theme['border']};
+            }}
+
+            QPushButton#secondary {{
+                background-color: {theme['button']};
+                color: {theme['button_text']};
+            }}
+
+            QPushButton#ghost {{
+                background-color: transparent;
+                border: 1px solid {theme['border']};
+            }}
+            QPushButton#ghost:hover {{
+                background-color: rgba(0, 0, 0, 0.06);
+            }}
+
+            QPushButton#danger {{
+                background-color: #8b5a5a;
+                color: white;
+                border-color: #8b5a5a;
+            }}
+            QPushButton#danger:hover {{
+                background-color: #734949;
+                border-color: #734949;
+            }}
+
+            /* ===== Tooltip / Dialog ===== */
+            QToolTip {{
+                background-color: {theme['base']};
+                color: {theme['text']};
+                border: 1px solid {theme['border']};
+                border-radius: 8px;
+                padding: 6px;
+            }}
+            QDialog {{
+                background-color: {theme['window']};
+            }}
+            
+            /* ===== ScrollBar ===== */
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 10px;
+                margin: 4px 2px 4px 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: rgba(0, 0, 0, 0.25);
+                min-height: 40px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background-color: rgba(0, 0, 0, 0.40);
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: none;
+            }}
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+
+            QScrollBar:horizontal {{
+                background: transparent;
+                height: 10px;
+                margin: 2px 4px 2px 4px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background-color: rgba(0, 0, 0, 0.25);
+                min-width: 40px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background-color: rgba(0, 0, 0, 0.40);
+            }}
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {{
+                width: 0px;
+                background: none;
+            }}
+            QScrollBar::add-page:horizontal,
+            QScrollBar::sub-page:horizontal {{
+                background: transparent;
+            }}
         """
+
         self.setStyleSheet(stylesheet)
-        self.btn_start_from_first.setStyleSheet("padding: 10px; font-size: 11pt;")
-        self.btn_start_from_current.setStyleSheet("padding: 10px; font-size: 11pt;")
-        self.preview_label.setStyleSheet(f"border: 1px solid {theme['border']};")
+        self.preview_label.setStyleSheet(
+            f"border: 1px solid {theme['border']}; border-radius: 8px;"
+        )
 
     def update_zoom_label(self, value):
+
         self.initial_zoom_percentage = value
         self.zoom_label.setText(f"{value}%")
 
