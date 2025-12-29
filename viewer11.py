@@ -436,7 +436,7 @@ class SyncProgressDialog(QDialog):
 class SyncThread(QThread):
     progress_signal = Signal(int, int)
     log_signal = Signal(str)
-    finished_signal = Signal(bool, int, bool, str)
+    finished_signal = Signal(bool, int, str)  # db_updated 인자 제거
 
     def __init__(self, sync_helper):
         super().__init__()
@@ -447,13 +447,11 @@ class SyncThread(QThread):
             self.log_signal.emit("Google Drive에 연결 중...")
             if not self.sync_helper.connect():
                 self.finished_signal.emit(
-                    False, 0, False, "구글 인증 실패: service_account.json 확인"
+                    False, 0, "구글 인증 실패: service_account.json 확인"
                 )
                 return
 
-            self.log_signal.emit(
-                "전체 파일 목록을 받아오는 중... (시간이 조금 걸릴 수 있습니다)"
-            )
+            self.log_signal.emit("전체 파일 목록을 받아오는 중...")
             items = []
             page_token = None
             query = f"'{self.sync_helper.drive_folder_id}' in parents and trashed=false"
@@ -470,76 +468,50 @@ class SyncThread(QThread):
                     .execute()
                 )
 
-                fetched_items = results.get("files", [])
-                items.extend(fetched_items)
-
+                items.extend(results.get("files", []))
                 page_token = results.get("nextPageToken")
                 if not page_token:
                     break
 
-                self.log_signal.emit(
-                    f"파일 목록 읽는 중... (현재 {len(items)}개 확인됨)"
-                )
-
             download_list = []
-            db_file = None
-            self.log_signal.emit(
-                f"총 {len(items)}개의 파일 검색됨. 동기화 대상 확인 중..."
-            )
-
+            # DB 파일(song_metadata.db) 관련 로직 삭제됨
             for item in items:
                 if "application/vnd.google-apps" in item["mimeType"]:
                     continue
 
                 file_name = item["name"]
+                # DB 파일은 동기화 대상에서 제외 (별도 버튼으로 관리)
                 if file_name == "song_metadata.db":
-                    db_file = item
                     continue
 
                 local_path = os.path.join(self.sync_helper.local_dir, file_name)
                 if not os.path.exists(local_path):
                     download_list.append(item)
 
-            total_actions = len(download_list) + (1 if db_file else 0)
-            current_action = 0
+            total_actions = len(download_list)
             download_count = 0
-            db_updated = False
 
             for item in download_list:
-                current_action += 1
+                download_count += 1
                 file_name = item["name"]
                 local_path = os.path.join(self.sync_helper.local_dir, file_name)
 
                 self.log_signal.emit(f"[다운로드] {file_name}")
-                self.progress_signal.emit(current_action, total_actions)
+                self.progress_signal.emit(download_count, total_actions)
 
                 try:
                     self.sync_helper._download_file(item["id"], local_path)
-                    download_count += 1
                 except Exception as e:
                     self.log_signal.emit(f"❌ 실패: {file_name} - {e}")
 
-            if db_file:
-                current_action += 1
-                self.log_signal.emit("[업데이트] 곡 정보 DB (song_metadata.db)")
-                self.progress_signal.emit(current_action, total_actions)
-                local_db_path = os.path.join(
-                    self.sync_helper.app_dir, "song_metadata.db"
-                )
-                try:
-                    self.sync_helper._download_file(db_file["id"], local_db_path)
-                    db_updated = True
-                except Exception as e:
-                    self.log_signal.emit(f"❌ DB 다운로드 실패 - {e}")
+            final_msg = "악보 파일 동기화가 완료되었습니다."
+            if download_count == 0:
+                final_msg = f"총 {len(items)}개 파일 확인됨. (새로운 악보 없음)"
 
-            final_msg = "동기화가 완료되었습니다."
-            if download_count == 0 and not db_updated:
-                final_msg = f"총 {len(items)}개 파일 확인됨. (새로운 파일 없음)"
-
-            self.finished_signal.emit(True, download_count, db_updated, final_msg)
+            self.finished_signal.emit(True, download_count, final_msg)
 
         except Exception as e:
-            self.finished_signal.emit(False, 0, False, f"오류 발생: {str(e)}")
+            self.finished_signal.emit(False, 0, f"오류 발생: {str(e)}")
 
 
 # --- [메타데이터(DB) 동기화 스레드] ---
@@ -3193,24 +3165,20 @@ class PraiseSheetViewer(QMainWindow):
             self.load_metadata_to_inspector(self.current_preview_path)
         self.status_bar_label.setText(msg)
 
-    def on_sync_finished(self, success, download_count, db_updated, msg):
+    def on_sync_finished(self, success, download_count, msg): # 인자 구조 변경
         self.sync_dialog.finish_sync(success, msg)
         self.sync_dialog.append_log("-" * 30)
         self.sync_dialog.append_log(f"결과: {msg}")
-        if success:
-            if download_count > 0:
-                self.sync_dialog.append_log(f"-> {download_count}개의 새 악보 저장됨")
-                self.model.setRootPath("")
-                self.model.setRootPath(self.sheet_music_path)
-
-            if db_updated:
-                self.sync_dialog.append_log("-> 곡 정보(DB) 최신화됨")
-                self.metadata_cache = self.load_all_metadata_from_db()
-                self.proxy_model.invalidate()
-                self.load_metadata_to_inspector(self.current_preview_path)
-
+        
+        if success and download_count > 0:
+            self.sync_dialog.append_log(f"-> {download_count}개의 새 악보 저장됨")
+            # 파일 목록 갱신
+            self.model.setRootPath("")
+            self.model.setRootPath(self.sheet_music_path)
+            
+        # 기존의 db_updated 체크 및 metadata_cache 갱신 로직 삭제
         self.status_bar_label.setText(msg)
-
+  
     # --- [듀얼 모니터] 관련 메서드들 ---
     def open_viewer_window(self, playlist_data, start_index):
         """쇼창(Viewer)을 열거나 업데이트합니다. 이제 경로 리스트가 아닌 data list를 받습니다."""
