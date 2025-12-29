@@ -1166,45 +1166,58 @@ class PraiseSheetViewer(QMainWindow):
         preview_layout.addWidget(self.preview_container)
         preview_layout.addWidget(self.btn_show_single)
 
+        # --- 곡 정보(Inspector) 영역 레이아웃 수정 ---
         inspector_group_box = QGroupBox("곡 정보")
-        inspector_layout = QFormLayout(inspector_group_box)
+        # 수직 레이아웃으로 변경하여 공간을 꽉 채우도록 설정
+        inspector_main_layout = QVBoxLayout(inspector_group_box)
+        inspector_main_layout.setContentsMargins(10, 5, 10, 5)  # 여백 축소
+        inspector_main_layout.setSpacing(5)
+
+        # 1. 상단 행: [곡 Key:] [콤보박스] | [가사:] (공백) [Google 버튼]
+        top_row_layout = QHBoxLayout()
 
         self.inspector_key_combo = QComboBox()
         self.inspector_key_combo.addItems(
             ["", "A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
         )
+        self.inspector_key_combo.setFixedWidth(70)  # 너비 최적화
 
+        self.btn_google_lyrics = QPushButton("Google 가사 검색")
+        self.btn_google_lyrics.setFixedWidth(130)  # 너비 고정
+        self.btn_google_lyrics.clicked.connect(self.search_lyrics_on_google)
+
+        top_row_layout.addWidget(QLabel("곡 Key:"))
+        top_row_layout.addWidget(self.inspector_key_combo)
+        top_row_layout.addSpacing(20)  # Key와 가사 라벨 사이 간격
+        top_row_layout.addWidget(QLabel("가사:"))
+        top_row_layout.addStretch()  # 중간 여백을 채워 버튼을 우측으로 밀어냄
+        top_row_layout.addWidget(self.btn_google_lyrics)
+
+        # 2. 가사 입력창 (공간을 많이 차지하지 않도록 높이 자동 조절)
         self.inspector_lyrics_edit = QTextEdit()
         self.inspector_lyrics_edit.setAcceptRichText(False)
         self.inspector_lyrics_edit.setPlaceholderText(
-            "가사 전체 또는 검색에 사용할 핵심 구절을 입력하세요."
+            "가사 전체 또는 검색용 핵심 구절 입력"
         )
 
-        self.btn_google_lyrics = QPushButton("Google 가사 검색")
-        self.btn_google_lyrics.clicked.connect(self.search_lyrics_on_google)
-
-        lyrics_label_layout = QHBoxLayout()
-        lyrics_label_layout.addWidget(QLabel("가사:"))
-        lyrics_label_layout.addStretch()
-        lyrics_label_layout.addWidget(self.btn_google_lyrics)
-
-        inspector_layout.addRow("곡 Key:", self.inspector_key_combo)
-        inspector_layout.addRow(lyrics_label_layout)
-        inspector_layout.addRow(self.inspector_lyrics_edit)
+        # 3. 하단 버튼 행 (DB 내려받기/올리기)
         db_buttons_layout = QHBoxLayout()
-        db_buttons_layout.addStretch()  # ← 먼저 넣기 (빈 공간이 왼쪽으로)
+        db_buttons_layout.addStretch()
+        self.btn_sync_db.setFixedSize(110, 30)  # 버튼 크기 살짝 축소
+        self.btn_push_db.setFixedSize(110, 30)
         db_buttons_layout.addWidget(self.btn_sync_db)
         db_buttons_layout.addWidget(self.btn_push_db)
-        self.btn_sync_db.setMinimumSize(120, 36)
-        self.btn_push_db.setMinimumSize(120, 36)
-        inspector_layout.addRow(db_buttons_layout)
 
-        self.center_splitter = QSplitter(Qt.Vertical)
+        # 레이아웃에 순서대로 추가
+        inspector_main_layout.addLayout(top_row_layout)
+        inspector_main_layout.addWidget(self.inspector_lyrics_edit)
+        inspector_main_layout.addLayout(db_buttons_layout)
 
+        # 스플리터 초기 비율 조정 (미리보기 8 : 정보창 2)
         self.center_splitter = QSplitter(Qt.Vertical)
         self.center_splitter.addWidget(preview_widget)
         self.center_splitter.addWidget(inspector_group_box)
-        self.center_splitter.setSizes([600, 200])
+        self.center_splitter.setSizes([700, 100])  # 미리보기 영역을 더 크게 할당
 
         self.inspector_key_combo.currentTextChanged.connect(
             self.on_inspector_key_changed
@@ -3165,20 +3178,20 @@ class PraiseSheetViewer(QMainWindow):
             self.load_metadata_to_inspector(self.current_preview_path)
         self.status_bar_label.setText(msg)
 
-    def on_sync_finished(self, success, download_count, msg): # 인자 구조 변경
+    def on_sync_finished(self, success, download_count, msg):  # 인자 구조 변경
         self.sync_dialog.finish_sync(success, msg)
         self.sync_dialog.append_log("-" * 30)
         self.sync_dialog.append_log(f"결과: {msg}")
-        
+
         if success and download_count > 0:
             self.sync_dialog.append_log(f"-> {download_count}개의 새 악보 저장됨")
             # 파일 목록 갱신
             self.model.setRootPath("")
             self.model.setRootPath(self.sheet_music_path)
-            
+
         # 기존의 db_updated 체크 및 metadata_cache 갱신 로직 삭제
         self.status_bar_label.setText(msg)
-  
+
     # --- [듀얼 모니터] 관련 메서드들 ---
     def open_viewer_window(self, playlist_data, start_index):
         """쇼창(Viewer)을 열거나 업데이트합니다. 이제 경로 리스트가 아닌 data list를 받습니다."""
