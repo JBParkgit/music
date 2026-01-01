@@ -1203,8 +1203,8 @@ class PraiseSheetViewer(QMainWindow):
         # 3. 하단 버튼 행 (DB 내려받기/올리기)
         db_buttons_layout = QHBoxLayout()
         db_buttons_layout.addStretch()
-        self.btn_sync_db.setFixedSize(110, 30)  # 버튼 크기 살짝 축소
-        self.btn_push_db.setFixedSize(110, 30)
+        self.btn_sync_db.setFixedSize(130, 35)  # 버튼 크기 살짝 축소
+        self.btn_push_db.setFixedSize(130, 35)
         db_buttons_layout.addWidget(self.btn_sync_db)
         db_buttons_layout.addWidget(self.btn_push_db)
 
