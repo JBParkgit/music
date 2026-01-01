@@ -1470,8 +1470,8 @@ class PraiseSheetViewer(QMainWindow):
         self.btn_black_screen.setObjectName("ghost")
         self.btn_logo_screen.setObjectName("ghost")
 
-        self.btn_delete.setObjectName("danger")
-        self.btn_delete_all.setObjectName("danger")
+        self.btn_delete.setObjectName("secondary")
+        self.btn_delete_all.setObjectName("secondary")
 
         # --- 우측 레이아웃 배치 순서 ---
         right_layout = QVBoxLayout()
