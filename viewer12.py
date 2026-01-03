@@ -2534,16 +2534,17 @@ class PraiseSheetViewer(QMainWindow):
         self.playlist_search_input.clear()
 
     def change_sheet_sort_order(self, text):
-        if text == "이름순 (오름차순)":
+        """악보 리스트 정렬 변경 (콤보박스 항목명과 일치시킴)"""
+        if text == "이름 ▲":
             self.proxy_model.setSortRole(Qt.DisplayRole)
             self.proxy_model.sort(0, Qt.AscendingOrder)
-        elif text == "이름순 (내림차순)":
+        elif text == "이름 ▼":
             self.proxy_model.setSortRole(Qt.DisplayRole)
             self.proxy_model.sort(0, Qt.DescendingOrder)
-        elif text == "키(Key)순 (오름차순)":
+        elif text == "Key ▲":
             self.proxy_model.setSortRole(Qt.UserRole)
             self.proxy_model.sort(0, Qt.AscendingOrder)
-        elif text == "키(Key)순 (내림차순)":
+        elif text == "Key ▼":
             self.proxy_model.setSortRole(Qt.UserRole)
             self.proxy_model.sort(0, Qt.DescendingOrder)
 
@@ -2552,13 +2553,15 @@ class PraiseSheetViewer(QMainWindow):
         self.update_file_count(self.sheet_music_path)
 
     def change_playlist_sort_order(self, text):
-        if text == "이름순 (오름차순)":
+        """플레이리스트 정렬 변경 (콤보박스 항목명과 일치시킴)"""
+        if text == "이름 ▲":
             self.playlist_proxy_model.sort(0, Qt.AscendingOrder)
-        elif text == "이름순 (내림차순)":
+        elif text == "이름 ▼":
             self.playlist_proxy_model.sort(0, Qt.DescendingOrder)
-        elif text == "수정날짜순 (최신)":
+        elif text == "날짜 (최신)":
+            # QFileSystemModel의 3번째 컬럼은 '수정 날짜'입니다.
             self.playlist_proxy_model.sort(3, Qt.DescendingOrder)
-        elif text == "수정날짜순 (오래된)":
+        elif text == "날짜 (오래된)":
             self.playlist_proxy_model.sort(3, Qt.AscendingOrder)
 
     def handle_tree_mouse_move(self, event, tree):
