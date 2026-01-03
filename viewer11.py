@@ -1203,8 +1203,8 @@ class PraiseSheetViewer(QMainWindow):
         # 3. 하단 버튼 행 (DB 내려받기/올리기)
         db_buttons_layout = QHBoxLayout()
         db_buttons_layout.addStretch()
-        self.btn_sync_db.setFixedSize(130, 35)  # 버튼 크기 살짝 축소
-        self.btn_push_db.setFixedSize(130, 35)
+        self.btn_sync_db.setFixedSize(110, 30)  # 버튼 크기 살짝 축소
+        self.btn_push_db.setFixedSize(110, 30)
         db_buttons_layout.addWidget(self.btn_sync_db)
         db_buttons_layout.addWidget(self.btn_push_db)
 
@@ -1518,6 +1518,59 @@ class PraiseSheetViewer(QMainWindow):
 
         # --- 웜업 ---
         self.warm_up_list_widget()
+
+    def delete_tree_file(self, file_path):
+        """트리 뷰에서 선택된 파일을 삭제하고 관련 데이터를 정리합니다."""
+        file_name = os.path.basename(file_path)
+        reply = QMessageBox.question(
+            self,
+            "파일 삭제 확인",
+            f"'{file_name}' 파일을 정말로 삭제하시겠습니까?\n"
+            f"이 작업은 되돌릴 수 없으며, 로컬 디스크에서 완전히 삭제됩니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply == QMessageBox.Yes:
+            try:
+                # 1. 파일 삭제
+                os.remove(file_path)
+
+                # 2. 즐겨찾기 목록에서 제거
+                if file_path in self.favorites:
+                    self.favorites.remove(file_path)
+                    self.save_favorites()
+
+                # 3. 메타데이터 캐시 및 DB 제거
+                if file_path in self.metadata_cache:
+                    del self.metadata_cache[file_path]
+
+                try:
+                    con = sqlite3.connect(self.db_path)
+                    cur = con.cursor()
+                    cur.execute(
+                        "DELETE FROM song_metadata WHERE file_path = ?",
+                        (file_path,),
+                    )
+                    con.commit()
+                    con.close()
+                except Exception as e:
+                    print(f"DB 데이터 삭제 실패: {e}")
+
+                # 4. 화면 갱신
+                self.proxy_model.invalidate()
+                self.current_preview_path = None
+                self.update_preview_panel(None)
+                self.load_metadata_to_inspector(None)
+
+                self.status_bar_label.setText(f"삭제됨: {file_name}")
+
+            except OSError as e:
+                QMessageBox.critical(
+                    self,
+                    "파일 삭제 오류",
+                    f"파일을 삭제하는 중 오류가 발생했습니다: {e}",
+                )
 
     # --- [추가] 인터미션 삽입 메서드 ---
     def insert_intermission_item(self):
@@ -2534,6 +2587,12 @@ class PraiseSheetViewer(QMainWindow):
             action_rename = QAction("이름 바꾸기", self)
             action_rename.triggered.connect(lambda: self.tree.edit(index))
             menu.addAction(action_rename)
+
+            # [추가됨] 삭제 액션
+            action_delete = QAction("삭제", self)
+            action_delete.triggered.connect(lambda: self.delete_tree_file(path))
+            menu.addAction(action_delete)
+
         if menu.actions():
             menu.exec(self.tree.viewport().mapToGlobal(pos))
 
