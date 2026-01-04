@@ -965,64 +965,18 @@ class PraiseSheetViewer(QMainWindow):
         # [UI 구성 시작]
         # =========================================================
 
-        # --- 1. 폴더 경로 설정 UI (설정창으로 이동할 항목들 정의) ---
+        # --- 1. 폴더 경로 설정 UI (설정창용) ---
         self.path_label = QLineEdit(os.path.normpath(self.sheet_music_path))
         self.path_label.setReadOnly(True)
-
         self.btn_change_folder = QPushButton("변경")
         self.btn_change_folder.clicked.connect(self.change_sheet_music_folder)
 
         self.playlist_path_label = QLineEdit(os.path.normpath(self.playlist_path))
         self.playlist_path_label.setReadOnly(True)
-
         self.btn_change_playlist_folder = QPushButton("변경")
         self.btn_change_playlist_folder.clicked.connect(self.change_playlist_folder)
 
-        # --- 2. 메인 화면용 도구 버튼 (동기화, 캡처 등) ---
-        self.btn_sync_drive = QPushButton()
-        self.set_icon_button(
-            self.btn_sync_drive,
-            QStyle.SP_DriveNetIcon,
-            "온라인 악보 받기",
-            " 온라인 동기화",
-        )
-        self.btn_sync_drive.clicked.connect(self.run_google_sync)
-
-        # [수정] 너비를 가변적으로 꽉 채우도록 설정
-        self.btn_sync_drive.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        if not GOOGLE_LIB_AVAILABLE:
-            self.btn_sync_drive.setEnabled(False)
-
-        self.btn_launch_capture = QPushButton()
-        self.btn_launch_capture.clicked.connect(self.launch_capture_tool)
-        self.set_icon_button(
-            self.btn_launch_capture, "📸", "웹에서 가사/악보 수집", " 악보수집 도구"
-        )
-
-        # [수정] 너비를 가변적으로 꽉 채우도록 설정
-        self.btn_launch_capture.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        # 상단 도구 모음 레이아웃 (경로창 대신 배치)
-        top_tools_layout = QHBoxLayout()
-        top_tools_layout.addWidget(self.btn_sync_drive)
-        top_tools_layout.addWidget(self.btn_launch_capture)
-        # [수정] addStretch() 제거 -> 우측 빈 공간 없이 버튼들이 꽉 채움
-
-        # DB 관련 버튼
-        self.btn_sync_db = QPushButton()
-        self.set_icon_button(self.btn_sync_db, "☁️⬇", "DB 내려받기", "DB 다운")
-        self.btn_sync_db.clicked.connect(self.run_db_sync)
-
-        self.btn_push_db = QPushButton()
-        self.set_icon_button(self.btn_push_db, "☁️⬆", "DB 올리기", "DB 업로드")
-        self.btn_push_db.clicked.connect(self.run_db_push)
-
-        if not GOOGLE_LIB_AVAILABLE:
-            self.btn_sync_db.setEnabled(False)
-            self.btn_push_db.setEnabled(False)
-
-        # 3. 트리 뷰 설정
+        # --- 2. 트리 뷰 설정 ---
         self.tree = QTreeView()
         self.tree.setModel(self.proxy_model)
         self.tree.setRootIndex(
@@ -1064,7 +1018,7 @@ class PraiseSheetViewer(QMainWindow):
         )
         self.playlist_tree.setEditTriggers(QAbstractItemView.EditKeyPressed)
 
-        # 4. 검색 및 필터 UI
+        # --- 3. 검색 및 필터 UI ---
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
         self.search_timer.setInterval(300)
@@ -1076,7 +1030,7 @@ class PraiseSheetViewer(QMainWindow):
 
         self.search_type_combo = QComboBox()
         self.search_type_combo.addItems(["파일이름", "가사"])
-        self.search_type_combo.setFixedWidth(80)
+        self.search_type_combo.setFixedWidth(120)
 
         self.btn_reset_search = QPushButton()
         self.set_icon_button(
@@ -1161,7 +1115,7 @@ class PraiseSheetViewer(QMainWindow):
         self.list_title = QLabel("찬양 리스트")
         self.list_title.setObjectName("panelTitle")
 
-        # 5. 중앙 패널 (미리보기 & Inspector)
+        # --- 4. 중앙 패널 (미리보기 & Inspector) ---
         self.preview_label = QLabel("파일을 선택하세요")
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setFont(QFont("맑은 고딕", 12))
@@ -1193,7 +1147,7 @@ class PraiseSheetViewer(QMainWindow):
         self.btn_show_single.setShortcut(Qt.Key_F6)
         self.btn_show_single.clicked.connect(self.start_single_song_show)
 
-        # Inspector (QWidget으로 변경하여 타이틀 제거)
+        # Inspector (곡 정보 패널)
         inspector_group_box = QWidget()
         inspector_main_layout = QVBoxLayout(inspector_group_box)
         inspector_main_layout.setContentsMargins(10, 10, 10, 10)
@@ -1217,11 +1171,45 @@ class PraiseSheetViewer(QMainWindow):
         top_row_layout.addStretch()
         top_row_layout.addWidget(self.btn_google_lyrics)
 
+        # 가사 입력창
         self.inspector_lyrics_edit = QTextEdit()
         self.inspector_lyrics_edit.setAcceptRichText(False)
         self.inspector_lyrics_edit.setPlaceholderText("가사 입력")
+        self.inspector_lyrics_edit.setMinimumHeight(200)
+
+        # 하단 버튼 그룹
+        self.btn_sync_drive = QPushButton()
+        self.set_icon_button(
+            self.btn_sync_drive,
+            QStyle.SP_DriveNetIcon,
+            "온라인 악보 받기",
+            " 악보동기화",
+        )
+        self.btn_sync_drive.clicked.connect(self.run_google_sync)
+        if not GOOGLE_LIB_AVAILABLE:
+            self.btn_sync_drive.setEnabled(False)
+
+        self.btn_launch_capture = QPushButton()
+        self.btn_launch_capture.clicked.connect(self.launch_capture_tool)
+        self.set_icon_button(
+            self.btn_launch_capture, "📸", "웹 또는 파일로 악보 수집", " 악보수집도구"
+        )
+
+        self.btn_sync_db = QPushButton()
+        self.set_icon_button(self.btn_sync_db, "⬇", "DB 내려받기", "가사DB다운")
+        self.btn_sync_db.clicked.connect(self.run_db_sync)
+
+        self.btn_push_db = QPushButton()
+        self.set_icon_button(self.btn_push_db, "⬆", "DB 올리기", "가사DB업로드")
+        self.btn_push_db.clicked.connect(self.run_db_push)
+
+        if not GOOGLE_LIB_AVAILABLE:
+            self.btn_sync_db.setEnabled(False)
+            self.btn_push_db.setEnabled(False)
 
         db_buttons_layout = QHBoxLayout()
+        db_buttons_layout.addWidget(self.btn_sync_drive)
+        db_buttons_layout.addWidget(self.btn_launch_capture)
         db_buttons_layout.addStretch()
         db_buttons_layout.addWidget(self.btn_sync_db)
         db_buttons_layout.addWidget(self.btn_push_db)
@@ -1236,7 +1224,7 @@ class PraiseSheetViewer(QMainWindow):
         self.inspector_lyrics_edit.installEventFilter(self)
         self.load_metadata_to_inspector(None)
 
-        # 6. 즐겨찾기 및 선택 버튼
+        # --- 5. 즐겨찾기 및 선택 버튼 ---
         self.btn_add_favorite = QPushButton()
         self.set_icon_button(self.btn_add_favorite, "⭐+", "즐겨찾기 추가", "추가")
         self.btn_add_favorite.clicked.connect(self.add_current_to_favorites)
@@ -1266,7 +1254,7 @@ class PraiseSheetViewer(QMainWindow):
         )
         self.btn_add_selected.clicked.connect(self.add_selected_file_single)
 
-        # 7. 우측 패널 버튼 및 제어
+        # --- 6. 우측 패널 버튼 및 제어 ---
         self.status_bar_label = QLabel()
 
         self.list_widget = QListWidget()
@@ -1293,20 +1281,17 @@ class PraiseSheetViewer(QMainWindow):
 
         self.btn_insert_intermission = QPushButton()
         self.set_icon_button(
-            self.btn_insert_intermission, "☕", "인터미션(휴식) 추가", "인터미션"
+            self.btn_insert_intermission, "☕", "인터미션 추가", "인터미션"
         )
         self.btn_insert_intermission.clicked.connect(self.insert_intermission_item)
 
         # 이동 버튼
         self.btn_move_up = QPushButton()
         self.set_icon_button(self.btn_move_up, QStyle.SP_ArrowUp, "위로", "위")
-
         self.btn_move_down = QPushButton()
         self.set_icon_button(self.btn_move_down, QStyle.SP_ArrowDown, "아래로", "아래")
-
         self.btn_move_top = QPushButton()
         self.set_icon_button(self.btn_move_top, "▲", "맨 위로", "맨위")
-
         self.btn_move_bottom = QPushButton()
         self.set_icon_button(self.btn_move_bottom, "▼", "맨 아래로", "맨아래")
 
@@ -1393,7 +1378,6 @@ class PraiseSheetViewer(QMainWindow):
         dual_group = QGroupBox("쇼 제어")
         dual_group.setLayout(dual_control_layout)
 
-        # 쇼 제어 그룹박스 스타일 강화
         dual_group.setStyleSheet(
             """
             QGroupBox {
@@ -1412,7 +1396,7 @@ class PraiseSheetViewer(QMainWindow):
         """
         )
 
-        # === [설정 버튼 및 다이얼로그 구성] ===
+        # --- [설정 버튼 및 다이얼로그 구성] ---
         # 1. 설정 다이얼로그 생성
         self.settings_dialog = QDialog(self)
         self.settings_dialog.setWindowTitle("환경설정")
@@ -1423,18 +1407,16 @@ class PraiseSheetViewer(QMainWindow):
         settings_layout.setSpacing(20)
         settings_layout.setContentsMargins(20, 20, 20, 20)
 
-        # --- [추가] 경로 설정 그룹 ---
+        # 경로 설정 그룹
         paths_group = QGroupBox("폴더 경로 설정")
         paths_layout = QVBoxLayout(paths_group)
 
-        # 악보 폴더
         sheet_path_layout = QHBoxLayout()
         sheet_path_layout.addWidget(QLabel("📂 악보 폴더:"))
         sheet_path_layout.addWidget(self.path_label)
         sheet_path_layout.addWidget(self.btn_change_folder)
         paths_layout.addLayout(sheet_path_layout)
 
-        # 플레이리스트 폴더
         playlist_path_layout = QHBoxLayout()
         playlist_path_layout.addWidget(QLabel("📂 리스트 폴더:"))
         playlist_path_layout.addWidget(self.playlist_path_label)
@@ -1443,7 +1425,7 @@ class PraiseSheetViewer(QMainWindow):
 
         settings_layout.addWidget(paths_group)
 
-        # --- [복구됨] 디스플레이 설정 위젯들 정의 ---
+        # 디스플레이 설정 위젯들 정의
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(self.themes.keys())
         self.theme_combo.setCurrentText(self.current_theme)
@@ -1469,32 +1451,28 @@ class PraiseSheetViewer(QMainWindow):
         self.btn_change_logo = QPushButton("변경")
         self.btn_change_logo.clicked.connect(self.change_logo_image)
 
-        # --- 기존 디스플레이 설정 그룹 ---
+        # 디스플레이 설정 그룹
         display_group = QGroupBox("디스플레이 및 동작 설정")
         display_layout = QVBoxLayout(display_group)
         display_layout.setSpacing(15)
 
-        # 테마
         theme_layout = QHBoxLayout()
         theme_layout.addWidget(QLabel("🎨 테마 선택:"))
         theme_layout.addWidget(self.theme_combo)
         display_layout.addLayout(theme_layout)
 
-        # 줌
         zoom_layout = QHBoxLayout()
         zoom_layout.addWidget(QLabel("🔍 기본 줌:"))
         zoom_layout.addWidget(self.zoom_slider)
         zoom_layout.addWidget(self.zoom_label)
         display_layout.addLayout(zoom_layout)
 
-        # 스크롤
         scroll_layout_box = QHBoxLayout()
         scroll_layout_box.addWidget(QLabel("🖱️ 스크롤 감도:"))
         scroll_layout_box.addWidget(self.scroll_slider)
         scroll_layout_box.addWidget(self.scroll_label)
         display_layout.addLayout(scroll_layout_box)
 
-        # 로고
         logo_layout = QHBoxLayout()
         logo_layout.addWidget(QLabel("🖼️ 로고 이미지:"))
         logo_layout.addWidget(self.logo_path_label)
@@ -1514,7 +1492,6 @@ class PraiseSheetViewer(QMainWindow):
         self.set_icon_button(
             self.btn_open_settings, "⚙️", "환경설정 (폴더, 테마 등)", " 환경설정"
         )
-        self.btn_open_settings.setObjectName("primary")
         self.btn_open_settings.clicked.connect(self.settings_dialog.show)
 
         # 우측 패널 레이아웃 재구성
@@ -1531,8 +1508,25 @@ class PraiseSheetViewer(QMainWindow):
         list_edit_layout.addWidget(self.btn_save_list)
         list_edit_layout.addWidget(self.btn_load_list)
 
-        shortcut_group_box = QGroupBox("단축키")
+        # [수정] 단축키 영역: 타이틀 제거 및 내부 여백 최소화 (리스트 영역 확장 효과)
+        shortcut_group_box = QGroupBox()
+        # 스타일시트로 상단 마진 제거하여 공간 확보
+        shortcut_group_box.setStyleSheet(
+            """
+            QGroupBox {
+                border: 1px solid #CCCCCC;
+                border-radius: 6px;
+                margin-top: 5px;
+                padding-top: 0px;
+            }
+        """
+        )
+
         shortcut_layout = QVBoxLayout(shortcut_group_box)
+        # 레이아웃 내부 여백을 촘촘하게 설정
+        shortcut_layout.setContentsMargins(10, 8, 10, 8)
+        shortcut_layout.setSpacing(2)
+
         shortcut_label = QLabel(
             "PgDn/→: 다음 | PgUp/←: 이전\n"
             "B: 블랙 | L: 로고 | Esc: 종료\n"
@@ -1541,11 +1535,10 @@ class PraiseSheetViewer(QMainWindow):
         shortcut_label.setAlignment(Qt.AlignLeft)
         shortcut_layout.addWidget(shortcut_label)
 
-        # 버튼 ObjectName 설정
+        # 버튼 ObjectName 설정 (스타일)
         self.btn_show_single.setObjectName("primary")
         self.btn_start_from_first.setObjectName("primary")
         self.btn_start_from_current.setObjectName("primary")
-        self.btn_launch_capture.setObjectName("primary")
         self.btn_add_selected.setObjectName("primary")
 
         # --- [UI 조립] ---
@@ -1558,9 +1551,6 @@ class PraiseSheetViewer(QMainWindow):
         top_layout.setSpacing(8)
 
         top_layout.addWidget(self.tree_title)
-        # [수정] 경로창 대신 도구 버튼들 배치
-        top_layout.addLayout(top_tools_layout)
-
         top_layout.addLayout(search_layout)
         top_layout.addLayout(sheet_controls_layout)
         top_layout.addWidget(self.tree)
@@ -1576,7 +1566,6 @@ class PraiseSheetViewer(QMainWindow):
         bottom_layout.setSpacing(8)
 
         bottom_layout.addWidget(self.list_title)
-        # [수정] 경로창 제거됨
         bottom_layout.addLayout(playlist_control_layout)
         bottom_layout.addWidget(self.playlist_tree)
 
@@ -3950,8 +3939,8 @@ if __name__ == "__main__":
 
     window = PraiseSheetViewer()
 
-    # [수정] 화면 크기를 1600, 900으로 설정
-    window.resize(1600, 900)
+    # [수정] 화면 크기를 1800, 900으로 설정
+    window.resize(1800, 900)
 
     # 전체 화면(showMaximized) 대신 일반 모드(show)로 실행
     window.show()
