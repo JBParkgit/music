@@ -46,6 +46,13 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QGraphicsOpacityEffect,
     QGraphicsDropShadowEffect,
+    QFrame,
+    QFontComboBox,
+    QToolButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QSpinBox,
 )
 from PySide6.QtGui import (
     QPixmap,
@@ -120,6 +127,9 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
             return ""
 
         if role == Qt.DisplayRole:
+            # 이름 열(0)만 커스텀 표시, 나머지(크기/유형/날짜)는 소스 모델 값 사용
+            if index.column() != 0:
+                return super().data(index, role)
             file_name = source_model.fileName(source_index)
             if not source_model.isDir(source_index):
                 file_path = source_model.filePath(source_index)
@@ -196,6 +206,25 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
             name_matches = self._filter_regex.match(base_name).hasMatch()
             return name_matches and file_path.lower().endswith(tuple(self.extensions))
 
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        """날짜 열(3) 정렬 시 파일 수정 시간 기준으로 비교합니다."""
+        source_model = self.sourceModel()
+
+        # 날짜 컬럼(3)일 때는 파일의 수정 시간을 기준으로 비교
+        if left.column() == 3 and right.column() == 3:
+            try:
+                left_index0 = source_model.index(left.row(), 0, left.parent())
+                right_index0 = source_model.index(right.row(), 0, right.parent())
+                path_left = source_model.filePath(left_index0)
+                path_right = source_model.filePath(right_index0)
+                t_left = os.path.getmtime(path_left) if os.path.exists(path_left) else 0
+                t_right = os.path.getmtime(path_right) if os.path.exists(path_right) else 0
+                return t_left < t_right  # 오름차순 기준, 내림차순은 프록시가 자동 반전
+            except (OSError, TypeError):
+                pass
+
+        return super().lessThan(left, right)
+
     def flags(self, index):
         default_flags = super().flags(index)
         if index.isValid():
@@ -262,6 +291,13 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
                 return False
 
         return super().setData(index, value, role)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            headers = ["이름", "크기", "유형", "날짜"]
+            if 0 <= section < len(headers):
+                return headers[section]
+        return super().headerData(section, orientation, role)
 
     def setFilterRegularExpression(self, pattern: QRegularExpression):
         self._filter_regex = pattern
@@ -625,7 +661,7 @@ class MetadataSyncThread(QThread):
 
                     batch.append((abs_path, song_key, lyrics, updated_at, updated_by))
                 if batch:
-                    # 로컬에서 아직 중앙에 업로드하지 않은(dirty=1) 항목은 덮어쓰지 않도록 보호합니다.
+                    # dirty 여부와 관계없이 항상 온라인 CSV 기준으로 덮어씁니다.
                     for rec in batch:
                         cur.execute(
                             """
@@ -635,8 +671,8 @@ class MetadataSyncThread(QThread):
                                 song_key=excluded.song_key,
                                 lyrics=excluded.lyrics,
                                 updated_at=excluded.updated_at,
-                                updated_by=excluded.updated_by
-                            WHERE COALESCE(song_metadata.dirty,0)=0
+                                updated_by=excluded.updated_by,
+                                dirty=0
                             """,
                             rec,
                         )
@@ -862,7 +898,280 @@ class MetadataUploadThread(QThread):
             self.finished_signal.emit(False, 0, f"중앙 업로드 오류: {str(e)}")
 
 
-# --- [메인 윈도우 클래스] ---
+# --- [추가] 텍스트 슬라이드 입력 다이얼로그 ---
+
+class TextSlideDialog(QDialog):
+    def __init__(self, parent=None, initial_data=None):
+        super().__init__(parent)
+        self.setWindowTitle("텍스트 슬라이드 추가")
+        self.resize(1000, 700) 
+        
+        main_layout = QHBoxLayout(self)
+        
+        # === 좌측 패널 (입력 및 설정) ===
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        
+        # 1. 텍스트 입력 영역
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlaceholderText("성경 구절이나 문구를 입력하세요...\n(예: 하나님은 사랑이시라)")
+        self.text_edit.textChanged.connect(self.update_preview)
+        
+        # 2. 테마 선택
+        grid_layout = QFormLayout()
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems([
+            "말씀 (Warm Paper)",
+            "기본 (Deep Black)", 
+            "새벽 (Midnight Blue)", 
+            "은혜 (Graceful Purple)"
+        ])
+        self.theme_combo.currentTextChanged.connect(self.update_preview)
+        grid_layout.addRow("🎨 테마:", self.theme_combo)
+
+        # 3. 폰트 설정 (폰트, 크기, 증감 버튼)
+        font_box = QHBoxLayout()
+        
+        # 폰트 패밀리
+        self.font_combo = QFontComboBox()
+        self.font_combo.setFontFilters(QFontComboBox.ScalableFonts)
+        self.font_combo.setEditable(False)
+        self.font_combo.setCurrentFont(QFont("맑은 고딕")) 
+        self.font_combo.currentFontChanged.connect(self.update_preview)
+        font_box.addWidget(self.font_combo, 2)
+
+        # 폰트 크기
+        self.size_combo = QComboBox()
+        self.size_combo.setEditable(True)
+        # 워드 프로세서 표준 크기 목록
+        self.standard_sizes = [
+            8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 
+            36, 48, 60, 72, 80, 96, 120, 150, 200
+        ]
+        self.size_combo.addItems([str(s) for s in self.standard_sizes])
+        
+        # 기본값 50
+        self.size_combo.setCurrentText("50")
+        
+        self.size_combo.editTextChanged.connect(self.update_preview)
+        self.size_combo.currentIndexChanged.connect(self.update_preview)
+        
+        font_box.addWidget(self.size_combo, 1)
+
+        # 크기 조절 버튼
+        self.btn_size_up = QToolButton()
+        self.btn_size_up.setText("가+") 
+        self.btn_size_up.setToolTip("글자 크게")
+        self.btn_size_up.clicked.connect(lambda: self.adjust_font_size(1))
+        
+        self.btn_size_down = QToolButton()
+        self.btn_size_down.setText("가-")
+        self.btn_size_down.setToolTip("글자 작게")
+        self.btn_size_down.clicked.connect(lambda: self.adjust_font_size(-1))
+
+        font_box.addWidget(self.btn_size_up)
+        font_box.addWidget(self.btn_size_down)
+
+        grid_layout.addRow("🔤 폰트:", font_box)
+        
+        # 4. 버튼
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        left_layout.addWidget(QLabel("📝 내용 입력:"))
+        left_layout.addWidget(self.text_edit, 1)
+        left_layout.addLayout(grid_layout)
+        left_layout.addWidget(button_box)
+        
+        # === 우측 패널 (미리보기) ===
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        
+        preview_group = QGroupBox("미리보기")
+        preview_inner_layout = QVBoxLayout(preview_group)
+        
+        # 16:9 비율 유지 프레임 (배경) -> 1920x1080의 1/3 = 640x360
+        self.preview_frame = QFrame()
+        self.preview_frame.setFixedSize(640, 360) 
+        self.preview_frame.setFrameShape(QFrame.NoFrame)
+        
+        # 카드 프레임 (내용물)
+        target_preview_width = 512 
+        
+        self.card_frame = QFrame(self.preview_frame)
+        self.card_frame.setFixedWidth(target_preview_width)
+        
+        frame_layout = QVBoxLayout(self.preview_frame)
+        frame_layout.addWidget(self.card_frame, 0, Qt.AlignCenter)
+        frame_layout.setContentsMargins(0,0,0,0)
+        
+        self.card_frame.setStyleSheet("background-color: transparent;")
+        
+        # 그림자 효과
+        self.shadow_effect = QGraphicsDropShadowEffect()
+        self.shadow_effect.setBlurRadius(20) 
+        self.shadow_effect.setColor(QColor(0, 0, 0, 50))
+        self.shadow_effect.setOffset(0, 2)
+        self.card_frame.setGraphicsEffect(self.shadow_effect)
+        
+        self.preview_label = QLabel(self.card_frame)
+        self.preview_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.preview_label.setWordWrap(True)
+        
+        card_layout = QVBoxLayout(self.card_frame)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.addWidget(self.preview_label)
+
+        preview_inner_layout.addWidget(self.preview_frame, 0, Qt.AlignCenter)
+        right_layout.addWidget(preview_group)
+        
+        main_layout.addWidget(left_panel, 1)
+        main_layout.addWidget(right_panel, 2)
+
+        # [추가] 초기 데이터가 있으면 설정
+        if initial_data:
+             self.setWindowTitle("텍스트 슬라이드 수정")
+             self.text_edit.setPlainText(initial_data.get("text", ""))
+             self.theme_combo.setCurrentText(initial_data.get("theme", "말씀 (Warm Paper)"))
+             
+             f_size = initial_data.get("font_size", 50)
+             self.size_combo.setCurrentText(str(f_size))
+             
+             if "font_family" in initial_data:
+                 self.font_combo.setCurrentFont(QFont(initial_data["font_family"]))
+        
+        self.update_preview()
+
+    def adjust_font_size(self, direction):
+        try:
+            current_val = float(self.size_combo.currentText())
+        except ValueError:
+            current_val = 50.0
+
+        import bisect
+        sorted_sizes = sorted(self.standard_sizes)
+        
+        idx = bisect.bisect_right(sorted_sizes, current_val)
+        
+        new_val = current_val
+        if direction > 0:
+            if idx < len(sorted_sizes):
+                new_val = sorted_sizes[idx]
+            else:
+                new_val = current_val + 5
+        else:
+            smaller = [s for s in sorted_sizes if s < current_val]
+            if smaller:
+                new_val = smaller[-1]
+            else:
+                new_val = max(5, current_val - 5)
+        
+        self.size_combo.setCurrentText(str(int(new_val)))
+
+    def get_data(self):
+        try:
+            f_size = int(float(self.size_combo.currentText()))
+        except:
+            f_size = 50
+            
+        return {
+            "text": self.text_edit.toPlainText().strip(),
+            "theme": self.theme_combo.currentText(),
+            "font_size": f_size,
+            "font_family": self.font_combo.currentFont().family()
+        }
+
+    def update_preview(self, *args):
+        text = self.text_edit.toPlainText() or "미리보기 텍스트"
+        theme = self.theme_combo.currentText()
+        
+        try:
+            font_size = float(self.size_combo.currentText())
+        except ValueError:
+            font_size = 50.0
+            
+        font_family = self.font_combo.currentFont().family()
+        
+        # 미리보기용 폰트 크기 조정 (정확히 1/3 비율)
+        scale_factor = 1/3
+        preview_font_size = max(5, int(font_size * scale_factor))
+        
+        self.preview_label.setText(text)
+        
+        style = self.get_theme_style(theme)
+        
+        # 1. 전체 배경
+        self.preview_frame.setStyleSheet(f"""
+            QFrame {{
+                {style['bg']}
+            }}
+        """)
+        
+        # 2. 카드 스타일
+        card_bg = "background-color: rgba(255, 255, 255, 0.9);"
+        border_style = "border: 1px solid #d0d0d0;"
+        radius = "border-radius: 6px;" 
+        
+        if "Deep Black" in theme or "Midnight" in theme:
+             card_bg = "background-color: rgba(0, 0, 0, 0.4);"
+             border_style = "border: 1px solid rgba(255, 255, 255, 0.2);"
+        
+        self.card_frame.setStyleSheet(f"""
+            QFrame {{
+                {card_bg}
+                {border_style}
+                {radius}
+            }}
+        """)
+        
+        # 3. 텍스트 스타일: 폰트 적용
+        padding_val = int(60 * scale_factor)
+        margin_val = int(50 * scale_factor)
+        
+        self.preview_label.setStyleSheet(f"""
+            QLabel {{
+                color: {style['color']};
+                font-family: '{font_family}';
+                font-size: {preview_font_size}pt;
+                font-weight: bold;
+                background-color: transparent;
+                border: none;
+                padding: {padding_val}px; 
+            }}
+        """)
+        
+        target_height = 360 - (margin_val * 2)
+        self.card_frame.setFixedHeight(target_height)
+        self.preview_frame.layout().setContentsMargins(0, margin_val, 0, margin_val)
+
+    def get_theme_style(self, theme_name):
+        # 테마별 CSS 정의 (배경 및 글자색)
+        if "새벽" in theme_name:
+            # Midnight Blue Gradient
+            return {
+                "bg": "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0f2027, stop:1 #203a43);",
+                "color": "#ffffff"
+            }
+        elif "말씀" in theme_name:
+            # Warm Paper / Brown Gradient
+            return {
+                "bg": "background-color: #f5f5f0;", # Matte paper color
+                "color": "#333333" 
+            }
+        elif "은혜" in theme_name:
+            # Soft Purple Gradient
+            return {
+                "bg": "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #23074d, stop:1 #cc5333);",
+                "color": "#333333"
+            }
+        else: # 기본 (Deep Black)
+            return {
+                "bg": "background-color: #000000;",
+                "color": "#ffffff"
+            }
+
 class PraiseSheetViewer(QMainWindow):
 
     # --- [헬퍼 메서드 수정] ---
@@ -892,7 +1201,7 @@ class PraiseSheetViewer(QMainWindow):
     # --- [__init__ 메서드 수정: 초기 크기 지정] ---
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("물댄동산 악보 뷰어 Pet1 2:9 V3")
+        self.setWindowTitle("물댄동산 악보 뷰어 Pet1 2:9 V4.1")
 
         # 초기 크기를 넉넉히 잡아 윈도우 매니저가 배치할 때 깜빡임 최소화
         self.resize(1600, 900)
@@ -904,6 +1213,7 @@ class PraiseSheetViewer(QMainWindow):
         self.viewer = None
         self.current_tooltip_index = QModelIndex()
         self.current_playlist_tooltip_item = None
+        self.current_list_tooltip_item = None
         self.current_preview_path = None
         self.inspector_current_path = None
         self.sync_thread = None
@@ -1003,9 +1313,15 @@ class PraiseSheetViewer(QMainWindow):
                 self.playlist_model.index(self.playlist_path)
             )
         )
-        self.playlist_tree.setColumnHidden(1, True)
-        self.playlist_tree.setColumnHidden(2, True)
-        self.playlist_tree.setColumnHidden(3, True)
+        # 이름 + 날짜만 보이도록 설정
+        self.playlist_tree.setColumnHidden(1, True)  # Size
+        self.playlist_tree.setColumnHidden(2, True)  # Type
+        self.playlist_tree.setColumnHidden(3, False)  # Date
+        header = self.playlist_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.playlist_tree.setSortingEnabled(True)
+        self.playlist_tree.sortByColumn(0, Qt.AscendingOrder)
         self.playlist_tree.setSelectionMode(QTreeView.SingleSelection)
         self.playlist_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.playlist_tree.customContextMenuRequested.connect(
@@ -1017,6 +1333,8 @@ class PraiseSheetViewer(QMainWindow):
             event, self.playlist_tree
         )
         self.playlist_tree.setEditTriggers(QAbstractItemView.EditKeyPressed)
+
+
 
         # --- 3. 검색 및 필터 UI ---
         self.search_timer = QTimer(self)
@@ -1071,8 +1389,15 @@ class PraiseSheetViewer(QMainWindow):
         self.key_filter_combo.currentTextChanged.connect(self.on_key_filter_changed)
 
         sheet_controls_layout = QHBoxLayout()
+
+        # [좌측 정렬] 정렬 라벨과 콤보박스
         sheet_controls_layout.addWidget(QLabel("정렬"))
         sheet_controls_layout.addWidget(self.sheet_sort_combo)
+
+        # [중요] 중간에 빈 공간(스프링)을 추가하여 Key 그룹을 우측 끝으로 밀어냅니다.
+        sheet_controls_layout.addStretch()
+
+        # [우측 정렬] Key 라벨과 콤보박스
         sheet_controls_layout.addWidget(QLabel("Key"))
         sheet_controls_layout.addWidget(self.key_filter_combo)
 
@@ -1123,6 +1448,8 @@ class PraiseSheetViewer(QMainWindow):
         self.preview_scroll_area = QScrollArea()
         self.preview_scroll_area.setWidgetResizable(True)
         self.preview_scroll_area.setWidget(self.preview_label)
+        self.preview_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.preview_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         self.preview_list_widget = QListWidget()
         self.preview_list_widget.itemDoubleClicked.connect(
@@ -1152,6 +1479,17 @@ class PraiseSheetViewer(QMainWindow):
         inspector_main_layout = QVBoxLayout(inspector_group_box)
         inspector_main_layout.setContentsMargins(10, 10, 10, 10)
         inspector_main_layout.setSpacing(5)
+
+        # 메타데이터 접기/펼치기 헤더
+        header_layout = QHBoxLayout()
+        self.btn_toggle_metadata = QToolButton()
+        self.btn_toggle_metadata.setText("조와 가사 ▼")
+        self.btn_toggle_metadata.setCheckable(True)
+        self.btn_toggle_metadata.setChecked(True)
+        self.btn_toggle_metadata.clicked.connect(self.toggle_metadata_panel)
+        header_layout.addWidget(self.btn_toggle_metadata)
+        header_layout.addStretch()
+        inspector_main_layout.addLayout(header_layout)
 
         top_row_layout = QHBoxLayout()
         self.inspector_key_combo = QComboBox()
@@ -1214,9 +1552,21 @@ class PraiseSheetViewer(QMainWindow):
         db_buttons_layout.addWidget(self.btn_sync_db)
         db_buttons_layout.addWidget(self.btn_push_db)
 
-        inspector_main_layout.addLayout(top_row_layout)
-        inspector_main_layout.addWidget(self.inspector_lyrics_edit)
+        # 메타데이터 영역(접기/펼치기 대상) 컨테이너
+        self.metadata_container = QWidget()
+        metadata_layout = QVBoxLayout(self.metadata_container)
+        metadata_layout.setContentsMargins(0, 0, 0, 0)
+        metadata_layout.setSpacing(5)
+        metadata_layout.addLayout(top_row_layout)
+        metadata_layout.addWidget(self.inspector_lyrics_edit)
+
+        inspector_main_layout.addWidget(self.metadata_container)
         inspector_main_layout.addLayout(db_buttons_layout)
+
+        # 기본 상태: 조와 가사(메타데이터) 영역을 접은 상태로 시작
+        self.metadata_container.hide()
+        self.btn_toggle_metadata.setText("조와 가사 ▶")
+        self.btn_toggle_metadata.setChecked(False)
 
         self.inspector_key_combo.currentTextChanged.connect(
             self.on_inspector_key_changed
@@ -1269,6 +1619,8 @@ class PraiseSheetViewer(QMainWindow):
         self.list_widget.customContextMenuRequested.connect(
             self.show_list_widget_context_menu
         )
+        self.list_widget.setMouseTracking(True)
+        self.list_widget.mouseMoveEvent = self.list_widget_mouse_move_event
 
         # 리스트 제어 버튼들
         self.btn_delete = QPushButton()
@@ -1284,6 +1636,13 @@ class PraiseSheetViewer(QMainWindow):
             self.btn_insert_intermission, "☕", "인터미션 추가", "인터미션"
         )
         self.btn_insert_intermission.clicked.connect(self.insert_intermission_item)
+
+        # [추가] 텍스트 추가 버튼
+        self.btn_add_text = QPushButton()
+        self.set_icon_button(
+            self.btn_add_text, "T", "텍스트(성경/문구) 추가", "텍스트 추가"
+        )
+        self.btn_add_text.clicked.connect(self.add_text_item)
 
         # 이동 버튼
         self.btn_move_up = QPushButton()
@@ -1311,6 +1670,25 @@ class PraiseSheetViewer(QMainWindow):
             self.btn_load_list, QStyle.SP_DialogOpenButton, "리스트 불러오기", "열기"
         )
         self.btn_load_list.clicked.connect(self.load_list)
+
+        # [레이아웃 수정] 버튼들을 보기 좋게 배치
+        list_control_layout_1 = QHBoxLayout()
+        list_control_layout_1.addWidget(self.btn_insert_intermission)
+        list_control_layout_1.addWidget(self.btn_add_text)
+        list_control_layout_1.addWidget(self.btn_delete)
+        list_control_layout_1.addWidget(self.btn_delete_all)
+
+        list_control_layout_2 = QHBoxLayout()
+        list_control_layout_2.addWidget(self.btn_move_top)
+        list_control_layout_2.addWidget(self.btn_move_up)
+        list_control_layout_2.addWidget(self.btn_move_down)
+        list_control_layout_2.addWidget(self.btn_move_bottom)
+        
+        list_control_layout_3 = QHBoxLayout()
+        list_control_layout_3.addWidget(self.btn_save_list)
+        list_control_layout_3.addWidget(self.btn_load_list)
+
+        # [Clean up] Unused layout block removed to avoid reparenting issues
 
         # 시작 버튼
         self.btn_start_from_first = QPushButton()
@@ -1363,6 +1741,18 @@ class PraiseSheetViewer(QMainWindow):
         self.monitor_combo = QComboBox()
         self.init_monitor_selection()
 
+        # ▼▼▼ [여기부터 추가하세요] ▼▼▼
+        # 실행 중 모니터 연결/해제 감지하여 목록 갱신
+        app_instance = QApplication.instance()
+        if app_instance:
+            app_instance.screenAdded.connect(
+                lambda screen: self.init_monitor_selection()
+            )
+            app_instance.screenRemoved.connect(
+                lambda screen: self.init_monitor_selection()
+            )
+        # ▲▲▲ [여기까지 추가] ▲▲▲
+
         dual_control_layout = QVBoxLayout()
         dual_control_layout.setSpacing(8)
 
@@ -1375,34 +1765,38 @@ class PraiseSheetViewer(QMainWindow):
         dual_control_layout.addWidget(self.monitor_combo)
         dual_control_layout.addLayout(screen_control_layout)
 
-        dual_group = QGroupBox("쇼 제어")
+        dual_group = QGroupBox()  # 타이틀 텍스트 제거
         dual_group.setLayout(dual_control_layout)
 
+        # 내부 여백을 줄여서 더 컴팩트하게 만듦
+        dual_control_layout.setContentsMargins(5, 5, 5, 5)
+
+        # 스타일시트 수정: margin-top 제거, title 스타일 제거
         dual_group.setStyleSheet(
             """
             QGroupBox {
                 border: 2px solid #555555;
                 border-radius: 8px;
-                margin-top: 20px;
-                font-weight: bold;
+                margin-top: 5px;  /* 상단 여백 최소화 */
+                padding: 0px;
             }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-                font-size: 14pt;
-                color: #333333;
-            }
+            /* 타이틀 관련 스타일 제거됨 */
         """
         )
 
         # --- [설정 버튼 및 다이얼로그 구성] ---
-        # 1. 설정 다이얼로그 생성
+        # 1. 설정 다이얼로그 생성 (기본 QDialog 사용)
         self.settings_dialog = QDialog(self)
+
+        # 2. 기본 설정 (타이틀, 크기)
         self.settings_dialog.setWindowTitle("환경설정")
         self.settings_dialog.resize(500, 450)
-        self.decorate_as_card(self.settings_dialog)
 
+        # 3. 스타일 설정 (카드 스타일 제거 -> 흰색 배경 적용)
+        # 둥근 모서리나 그림자 없이 깔끔한 기본 창으로 만듭니다.
+        # self.settings_dialog.setStyleSheet("background-color: #FFFFFF;")
+
+        # 4. 레이아웃 설정
         settings_layout = QVBoxLayout(self.settings_dialog)
         settings_layout.setSpacing(20)
         settings_layout.setContentsMargins(20, 20, 20, 20)
@@ -1568,6 +1962,9 @@ class PraiseSheetViewer(QMainWindow):
         bottom_layout.addWidget(self.list_title)
         bottom_layout.addLayout(playlist_control_layout)
         bottom_layout.addWidget(self.playlist_tree)
+        self.btn_playlist_stats = QPushButton("📊 플레이 리스트 곡 통계")
+        self.btn_playlist_stats.clicked.connect(self.open_playlist_song_stats_dialog)
+        bottom_layout.addWidget(self.btn_playlist_stats)
 
         # 좌측 스플리터
         left_splitter = QSplitter(Qt.Vertical)
@@ -1596,7 +1993,8 @@ class PraiseSheetViewer(QMainWindow):
         self.center_splitter = QSplitter(Qt.Vertical)
         self.center_splitter.addWidget(preview_widget)
         self.center_splitter.addWidget(inspector_group_box)
-        self.center_splitter.setSizes([700, 160])
+        # 기본값: 메타데이터 패널이 접힌 상태를 기준으로 넓게 설정
+        self.center_splitter.setSizes([850, 80])
         self.center_splitter.setHandleWidth(10)
 
         # 4. 우측 패널 (리스트 및 제어)
@@ -1611,8 +2009,14 @@ class PraiseSheetViewer(QMainWindow):
 
         right_layout.addWidget(right_title)
         right_layout.addWidget(self.list_widget, 1)
-        right_layout.addLayout(list_control_grid)
-        right_layout.addLayout(list_edit_layout)
+        
+        # [수정] 새로 만든 레이아웃 적용
+        right_layout.addLayout(list_control_layout_1)
+        right_layout.addLayout(list_control_layout_2)
+        right_layout.addLayout(list_control_layout_3)
+        
+        # right_layout.addLayout(list_control_grid) # 기존 코드 제거
+        # right_layout.addLayout(list_edit_layout)  # 기존 코드 제거
         right_layout.addWidget(dual_group)
         right_layout.addWidget(self.btn_open_settings)
         right_layout.addWidget(shortcut_group_box)
@@ -1629,6 +2033,7 @@ class PraiseSheetViewer(QMainWindow):
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
+        self.menuBar().setVisible(False)
 
         # --- 초기화 마무리 ---
         self.tree.selectionModel().currentChanged.connect(
@@ -1713,6 +2118,52 @@ class PraiseSheetViewer(QMainWindow):
                 )
 
     # --- [추가] 인터미션 삽입 메서드 ---
+    def add_text_item(self):
+        """텍스트 슬라이드를 추가합니다."""
+        # 기본값(마지막 사용 값)으로 초기화된 데이터 전달
+        initial_data = {
+            "font_family": getattr(self, "text_slide_font_family", "맑은 고딕"),
+            "font_size": getattr(self, "text_slide_font_size", 50),
+            "theme": "말씀 (Warm Paper)", # 기본 테마
+            "text": ""
+        }
+        
+        dialog = TextSlideDialog(self, initial_data)
+        if dialog.exec() == QDialog.Accepted:
+            data = dialog.get_data()
+            text = data["text"]
+            theme = data["theme"]
+            
+            if not text:
+                return
+
+            # 변경된 설정 저장 (다음 번에 기본값으로 사용)
+            self.text_slide_font_family = data["font_family"]
+            self.text_slide_font_size = data["font_size"]
+            self.save_settings()
+
+            # 리스트 아이템 생성
+            item = QListWidgetItem()
+            
+            # 아이템 텍스트 (목록에 보여질 이름)
+            summary = text.split('\n')[0]
+            if len(summary) > 20:
+                summary = summary[:20] + "..."
+            item.setText(f"📖 {summary} ({theme})")
+            
+            # 데이터 저장
+            item.setData(Qt.UserRole, text)          # 텍스트 내용
+            item.setData(Qt.UserRole + 1, False)     # 인터미션 아님
+            item.setData(Qt.UserRole + 2, "text")    # 타입: 텍스트
+            item.setData(Qt.UserRole + 3, {
+                "theme": theme, 
+                "font_size": data["font_size"],
+                "font_family": data["font_family"]
+            })
+            
+            self.list_widget.addItem(item)
+            self.list_widget.setCurrentItem(item)
+
     def insert_intermission_item(self):
         """인터미션용 이미지를 선택하여 리스트에 추가합니다."""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -2056,6 +2507,36 @@ class PraiseSheetViewer(QMainWindow):
             self.current_playlist_tooltip_item = None
         QListWidget.mouseMoveEvent(self.preview_list_widget, event)
 
+    def list_widget_mouse_move_event(self, event):
+        """큐시트 리스트에서 마우스 이동 시 툴팁으로 악보 미리보기를 표시합니다."""
+        item = self.list_widget.itemAt(event.position().toPoint())
+        if item is not None and item != self.current_list_tooltip_item:
+            self.current_list_tooltip_item = item
+            path = item.data(Qt.UserRole)
+            if (
+                path
+                and os.path.isfile(path)
+                and path.lower().endswith(tuple(self.image_extensions))
+            ):
+                pixmap = QPixmap(path)
+                if not pixmap.isNull():
+                    fixed_width = 250
+                    scaled = pixmap.scaledToWidth(fixed_width, Qt.SmoothTransformation)
+                    tooltip = f'<img style="margin:0;padding:0;" src="{path}" width="{scaled.width()}" height="{scaled.height()}"/>'
+                    QToolTip.showText(
+                        event.globalPosition().toPoint() + QPoint(20, 20),
+                        tooltip,
+                        self.list_widget,
+                    )
+                else:
+                    QToolTip.hideText()
+            else:
+                QToolTip.hideText()
+        elif item is None:
+            QToolTip.hideText()
+            self.current_list_tooltip_item = None
+        QListWidget.mouseMoveEvent(self.list_widget, event)
+
     def add_preview_list_item_to_main_list(self, item):
         path = item.data(Qt.UserRole)
         is_intermission = item.data(Qt.UserRole + 1)
@@ -2077,6 +2558,27 @@ class PraiseSheetViewer(QMainWindow):
             self.list_widget.addItem(new_item)
 
     def start_single_song_show(self):
+        # 플레이리스트 미리보기에서 선택된 항목이 있는지 확인
+        if self.preview_stack.currentWidget() == self.preview_list_widget:
+            selected_items = self.preview_list_widget.selectedItems()
+            if selected_items:
+                item = selected_items[0]
+                path = item.data(Qt.UserRole)
+                if path and os.path.isfile(path):
+                    is_image = path.lower().endswith(tuple(self.image_extensions))
+                    if is_image:
+                        single_data = [{"path": path, "is_intermission": False}]
+                        self.open_viewer_window(single_data, 0)
+                        return
+                    else:
+                        QMessageBox.warning(
+                            self,
+                            "알림",
+                            "이미지 파일만 쇼를 시작할 수 있습니다. (.pls 파일 등은 불가)",
+                        )
+                        return
+        
+        # 기존 로직: current_preview_path 사용
         if not self.current_preview_path:
             QMessageBox.warning(self, "알림", "쇼를 시작할 곡을 먼저 선택해주세요.")
             return
@@ -2156,7 +2658,7 @@ class PraiseSheetViewer(QMainWindow):
                 "highlight_text": "#FFFFFF",
                 "border": "#2E8B57",
             },
-            "어둡게": {
+            "다크": {
                 "base": "#3E3E3E",
                 "window": "#2D2D2D",
                 "text": "#E0E0E0",
@@ -2182,28 +2684,89 @@ class PraiseSheetViewer(QMainWindow):
         self.current_theme = theme_name
         self.apply_theme(theme_name)
 
+    # [추가] 텍스트 슬라이드 수정 메서드 (클래스 내부에 추가)
+    def edit_text_slide(self, item):
+        """기존 텍스트 슬라이드를 수정합니다."""
+        text = item.data(Qt.UserRole)
+        extra = item.data(Qt.UserRole + 3) or {}
+        theme = extra.get("theme", "기본")
+        font_size = extra.get("font_size", 50)
+        font_family = extra.get("font_family", "맑은 고딕")
+        
+        initial_data = {
+            "text": text,
+            "theme": theme,
+            "font_size": font_size,
+            "font_family": font_family
+        }
+        
+        dialog = TextSlideDialog(self, initial_data)
+        if dialog.exec() == QDialog.Accepted:
+            new_data = dialog.get_data()
+            new_text = new_data["text"]
+            new_theme = new_data["theme"]
+            new_font_size = new_data["font_size"]
+            new_font_family = new_data["font_family"]
+            
+            # 아이템 업데이트
+            summary = new_text.split('\n')[0]
+            if len(summary) > 20:
+                summary = summary[:20] + "..."
+            item.setText(f"📖 {summary} ({new_theme})")
+            
+            item.setData(Qt.UserRole, new_text)
+            item.setData(Qt.UserRole + 3, {
+                "theme": new_theme, 
+                "font_size": new_font_size,
+                "font_family": new_font_family
+            })
+
     def apply_theme(self, theme_name):
-        """Modern Flat Style 테마 적용"""
-        # 테마별 색상 팔레트 (기본 밝은 테마 기준)
-        # 메인 배경: #F5F5F7 (연한 회색)
-        # 카드 배경: #FFFFFF (흰색)
-        # 텍스트: #333333
+        """Modern Flat Style 테마 적용 (라벨 투명화 및 다크모드 완벽 지원)"""
 
         theme = self.themes.get(theme_name, self.themes["기본 (밝게)"])
 
-        # 메인 배경색 결정 (어두운 테마인 경우 분기 처리 가능)
-        main_bg = "#F5F5F7" if "어둡게" not in theme_name else "#121212"
-        card_bg = "#FFFFFF" if "어둡게" not in theme_name else "#1E1E1E"
-        text_col = "#333333" if "어둡게" not in theme_name else "#E0E0E0"
-        border_col = "#E5E5E5" if "어둡게" not in theme_name else "#333333"
+        is_dark = "다크" in theme_name or "어둡게" in theme_name
+
+        if is_dark:
+            main_bg = theme.get("base", "#121212")
+            card_bg = theme.get("window", "#1E1E1E")
+            text_col = theme.get("text", "#E0E0E0")
+            border_col = theme.get("border", "#333333")
+        else:
+            main_bg = "#F5F5F7"
+            card_bg = theme.get("window", "#FFFFFF")
+            text_col = theme.get("text", "#333333")
+            border_col = theme.get("border", "#E5E5E5")
+
+        highlight = theme.get("highlight", "#3CB371")
+        highlight_text = theme.get("highlight_text", "#FFFFFF")
+        button_bg = theme.get("button", "#F5F5F5")
+        button_text = theme.get("button_text", "#000000")
 
         stylesheet = f"""
+            /* ===== Main Window & Dialogs ===== */
+            QMainWindow {{
+                background-color: {main_bg};
+            }}
+            QDialog {{
+                background-color: {card_bg};
+                color: {text_col};
+            }}
+
             /* ===== Global ===== */
             QWidget {{
                 background-color: {main_bg};
                 color: {text_col};
                 font-family: '맑은 고딕', 'Malgun Gothic', sans-serif;
-                font-size: 11pt; /* 기본 폰트 크기 상향 */
+                font-size: 11pt;
+            }}
+
+            /* [중요] 라벨 전용 스타일: 배경을 투명하게 해서 부모(카드/메인) 색상에 자연스럽게 녹아들게 함 */
+            QLabel {{
+                background-color: transparent;
+                color: {text_col};
+                border: none;
             }}
             
             /* ===== Cards (Containers) ===== */
@@ -2214,22 +2777,20 @@ class PraiseSheetViewer(QMainWindow):
             }}
             
             /* ===== Typography ===== */
+            /* 패널 타이틀은 폰트 크기만 더 키움 (배경 투명은 위 QLabel 규칙을 따름) */
             QLabel#panelTitle {{
                 font-size: 14pt;
                 font-weight: bold;
-                color: {text_col};
                 padding-bottom: 5px;
-                background-color: transparent;
-                border: none;
             }}
             
             /* ===== Inputs & Lists ===== */
-            /* 카드 내부 요소들은 배경을 투명하게 하거나 흰색 유지 */
             QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {{
-                background-color: {main_bg}; /* 입력창은 약간 어둡게 */
+                background-color: {card_bg};
                 border: 1px solid {border_col};
                 border-radius: 6px;
                 padding: 6px;
+                color: {text_col};
             }}
             
             QTreeView, QListWidget, QScrollArea {{
@@ -2240,53 +2801,57 @@ class PraiseSheetViewer(QMainWindow):
             }}
             
             QTreeView::item, QListWidget::item {{
-                padding: 6px; /* 리스트 간격 확보 */
+                padding: 6px;
                 border-bottom: 1px solid transparent;
             }}
             
             QTreeView::item:hover, QListWidget::item:hover {{
-                background-color: #F0F2F5;
+                background-color: {main_bg};
                 border-radius: 4px;
+                color: {text_col};
             }}
             
             QTreeView::item:selected, QListWidget::item:selected {{
-                background-color: {theme['highlight']};
-                color: {theme['highlight_text']};
+                background-color: {highlight};
+                color: {highlight_text};
                 border-radius: 4px;
             }}
 
             /* ===== Splitter ===== */
             QSplitter::handle {{
                 background-color: transparent;
-                margin: 0px 5px; /* 스플리터 핸들 주변 여백 */
+                margin: 0px 5px;
             }}
 
             /* ===== Buttons ===== */
             QPushButton {{
-                background-color: #FFFFFF;
+                background-color: {button_bg};
+                color: {button_text};
                 border: 1px solid {border_col};
                 border-radius: 6px;
                 padding: 8px 15px;
                 font-weight: 600;
             }}
             QPushButton:hover {{
-                background-color: #F8F9FA;
-                border-color: #B0B0B0;
+                background-color: {button_bg}; 
+                border: 1px solid {highlight};
+                color: {button_text};
             }}
             QPushButton:pressed {{
-                background-color: #E2E6EA;
+                background-color: {button_bg};
+                border: 2px solid {highlight};
             }}
             
-            /* Primary Button (강조) */
+            /* Primary Button (강조 버튼) */
             QPushButton#primary {{
-                background-color: {theme['highlight']};
-                color: {theme['highlight_text']};
+                background-color: {highlight};
+                color: {highlight_text};
                 border: none;
             }}
             QPushButton#primary:hover {{
-                background-color: #4A90E2; /* 예시 */
+                border: 2px solid {card_bg};
             }}
-
+            
             /* ScrollBars */
             QScrollBar:vertical {{
                 background: transparent;
@@ -2312,11 +2877,12 @@ class PraiseSheetViewer(QMainWindow):
                 subcontrol-position: top left;
                 padding: 0 5px;
                 font-weight: bold;
+                color: {text_col};
             }}
         """
         self.setStyleSheet(stylesheet)
 
-        # 미리보기 라벨 등 개별 스타일 조정
+        # 미리보기 라벨은 이미 위 QLabel 규칙으로 투명이 되었으나, 안전장치로 유지
         self.preview_label.setStyleSheet("background-color: transparent; border: none;")
 
     def update_zoom_label(self, value):
@@ -2368,7 +2934,9 @@ class PraiseSheetViewer(QMainWindow):
                     self.scroll_sensitivity = settings.get("scroll_sensitivity", 30)
                     self.logo_image_path = settings.get("logo_image_path", "")
 
-                    self.drive_folder_id = "1fFN1w070XmwIHhbNxfuUzNXY7tAwWSzC"
+                    self.drive_folder_id = settings.get(
+                        "drive_folder_id", self.drive_folder_id
+                    )
                     self.metadata_csv_name = settings.get(
                         "metadata_csv_name", self.metadata_csv_name
                     )
@@ -2376,10 +2944,17 @@ class PraiseSheetViewer(QMainWindow):
                         "metadata_sheet_name", self.metadata_sheet_name
                     )
                     self.editor_name = settings.get("editor_name", self.editor_name)
+                    
+                    self.text_slide_font_family = settings.get("text_slide_font_family", "맑은 고딕")
+                    self.text_slide_font_size = settings.get("text_slide_font_size", 50)
             else:
+                self.text_slide_font_family = "맑은 고딕"
+                self.text_slide_font_size = 50
                 self.save_settings()
         except (json.JSONDecodeError, TypeError, OSError) as e:
             print(f"설정 로드 오류 (기본값 사용): {e}")
+            self.text_slide_font_family = "맑은 고딕"
+            self.text_slide_font_size = 50
             self.save_settings()
 
     def save_settings(self):
@@ -2393,7 +2968,10 @@ class PraiseSheetViewer(QMainWindow):
             "drive_folder_id": self.drive_folder_id,
             "metadata_csv_name": self.metadata_csv_name,
             "metadata_sheet_name": self.metadata_sheet_name,
+            "metadata_sheet_name": self.metadata_sheet_name,
             "editor_name": self.editor_name,
+            "text_slide_font_family": getattr(self, "text_slide_font_family", "맑은 고딕"),
+            "text_slide_font_size": getattr(self, "text_slide_font_size", 50),
         }
         try:
             with open(self.settings_file, "w", encoding="utf-8") as f:
@@ -2436,6 +3014,36 @@ class PraiseSheetViewer(QMainWindow):
                 )
             )
             self.save_settings()
+
+    def toggle_metadata_panel(self):
+        """곡 메타데이터 영역을 접거나 펼칩니다. 하단 동기화/DB 버튼은 항상 보이도록 유지합니다."""
+        if not hasattr(self, "metadata_container"):
+            return
+        is_visible = self.metadata_container.isVisible()
+        if is_visible:
+            self.metadata_container.hide()
+            if hasattr(self, "btn_toggle_metadata"):
+                self.btn_toggle_metadata.setText("조와 가사 ▶")
+                self.btn_toggle_metadata.setChecked(False)
+            # 메타데이터를 접으면 미리보기 영역을 더 넓게
+            if hasattr(self, "center_splitter"):
+                self.center_splitter.setSizes([850, 80])
+        else:
+            self.metadata_container.show()
+            if hasattr(self, "btn_toggle_metadata"):
+                self.btn_toggle_metadata.setText("조와 가사 ▼")
+                self.btn_toggle_metadata.setChecked(True)
+            if hasattr(self, "center_splitter"):
+                self.center_splitter.setSizes([700, 160])
+
+    def open_playlist_song_stats_dialog(self):
+        """플레이 리스트 곡 통계 다이얼로그를 연다. 인터미션 제외, 메타데이터 미반영."""
+        dlg = PlaylistSongStatsDialog(
+            self.playlist_path,
+            self.sheet_music_path,
+            parent=self,
+        )
+        dlg.exec()
 
     def change_logo_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -2669,24 +3277,32 @@ class PraiseSheetViewer(QMainWindow):
 
     def show_playlist_context_menu(self, pos):
         index = self.playlist_tree.indexAt(pos)
-        if not index.isValid():
-            return
-        self.playlist_tree.setCurrentIndex(index)
-        source_index = self.playlist_proxy_model.mapToSource(index)
-        path = self.playlist_model.filePath(source_index)
-        if not os.path.isfile(path):
-            return
         menu = QMenu()
-        action_add_to_list = QAction("목록에 추가하기", self)
-        action_add_to_list.triggered.connect(lambda: self._add_paths_from_pls(path))
-        menu.addAction(action_add_to_list)
+        if index.isValid():
+            self.playlist_tree.setCurrentIndex(index)
+            source_index = self.playlist_proxy_model.mapToSource(index)
+            path = self.playlist_model.filePath(source_index)
+            if os.path.isfile(path):
+                action_add_to_list = QAction("목록에 추가하기", self)
+                action_add_to_list.triggered.connect(
+                    lambda: self._add_paths_from_pls(path)
+                )
+                menu.addAction(action_add_to_list)
+                menu.addSeparator()
+                action_rename = QAction("이름 바꾸기", self)
+                action_rename.triggered.connect(
+                    lambda: self.playlist_tree.edit(index)
+                )
+                menu.addAction(action_rename)
+                action_delete = QAction("삭제", self)
+                action_delete.triggered.connect(
+                    lambda: self.delete_playlist_file(path)
+                )
+                menu.addAction(action_delete)
         menu.addSeparator()
-        action_rename = QAction("이름 바꾸기", self)
-        action_rename.triggered.connect(lambda: self.playlist_tree.edit(index))
-        menu.addAction(action_rename)
-        action_delete = QAction("삭제", self)
-        action_delete.triggered.connect(lambda: self.delete_playlist_file(path))
-        menu.addAction(action_delete)
+        action_stats = QAction("플레이 리스트 곡 통계 보기", self)
+        action_stats.triggered.connect(self.open_playlist_song_stats_dialog)
+        menu.addAction(action_stats)
         menu.exec(self.playlist_tree.viewport().mapToGlobal(pos))
 
     def delete_playlist_file(self, path):
@@ -2930,6 +3546,13 @@ class PraiseSheetViewer(QMainWindow):
                 )
                 menu.addAction(action_toggle_intm)
 
+            # [추가] 텍스트 아이템 수정 메뉴
+            item_type = sel_item.data(Qt.UserRole + 2)
+            if item_type == "text":
+                menu.addSeparator()
+                action_edit_text = QAction("텍스트 수정", self)
+                action_edit_text.triggered.connect(lambda: self.edit_text_slide(sel_item))
+                menu.addAction(action_edit_text)
         menu.addSeparator()
         action_delete = QAction("삭제", self)
         action_delete.triggered.connect(self.delete_selected_items)
@@ -3024,6 +3647,11 @@ class PraiseSheetViewer(QMainWindow):
             items_to_save = []
             for i in range(self.list_widget.count()):
                 item = self.list_widget.item(i)
+                
+                # 텍스트 아이템(슬라이드)은 저장하지 않음 (요청사항)
+                if item.data(Qt.UserRole + 2) == "text":
+                    continue
+                    
                 data = {
                     "path": os.path.relpath(
                         item.data(Qt.UserRole), self.sheet_music_path
@@ -3096,15 +3724,20 @@ class PraiseSheetViewer(QMainWindow):
             if not pixmap.isNull():
                 preview_width = self.preview_scroll_area.viewport().width()
                 if preview_width > 0:
+                    # 가로 너비를 꽉 채우고, 세로는 비율 유지 (가로 스크롤 없음, 세로 스크롤만 가능)
                     scaled_pixmap = pixmap.scaledToWidth(
-                        int(preview_width * 0.95), Qt.SmoothTransformation
+                        preview_width, Qt.SmoothTransformation
                     )
                     self.preview_label.setPixmap(scaled_pixmap)
                     self.preview_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+                    self.preview_label.setMinimumWidth(preview_width)
+                    self.preview_label.setMaximumWidth(preview_width)
                     self.preview_scroll_area.verticalScrollBar().setValue(0)
                 else:
                     self.preview_label.setText("미리보기 영역이 너무 작습니다.")
                     self.preview_label.setAlignment(Qt.AlignCenter)
+                    self.preview_label.setMinimumWidth(0)
+                    self.preview_label.setMaximumWidth(16777215)
             else:
                 self.preview_label.setText("이미지를 불러올 수 없습니다.")
                 self.preview_label.setAlignment(Qt.AlignCenter)
@@ -3351,15 +3984,27 @@ class PraiseSheetViewer(QMainWindow):
         # 사용자가 선택한 모니터 인덱스 가져오기
         screen_index = self.monitor_combo.currentIndex()
         screens = QApplication.screens()
-
+        
         if 0 <= screen_index < len(screens):
             target_screen = screens[screen_index]
+            # 창 크기를 타겟 화면 크기로 설정
+            screen_geometry = target_screen.geometry()
+            self.viewer.resize(screen_geometry.width(), screen_geometry.height())
             self.viewer.move(target_screen.geometry().topLeft())
-            self.viewer.showFullScreen()
             if self.viewer.windowHandle():
                 self.viewer.windowHandle().setScreen(target_screen)
         else:
-            self.viewer.showFullScreen()
+            # 기본 화면 크기로 설정
+            if screens:
+                primary_screen = screens[0]
+                screen_geometry = primary_screen.geometry()
+                self.viewer.resize(screen_geometry.width(), screen_geometry.height())
+                self.viewer.move(screen_geometry.topLeft())
+        
+        # 모든 설정이 완료된 후에만 화면에 표시
+        self.viewer.setAttribute(Qt.WA_DontShowOnScreen, False)
+        self.viewer.setWindowState(Qt.WindowFullScreen)
+        self.viewer.show()
 
         self.btn_toggle_dual_viewer.setChecked(True)
         self.btn_toggle_dual_viewer.setText("쇼창 끄기")
@@ -3389,9 +4034,21 @@ class PraiseSheetViewer(QMainWindow):
         data = []
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            path = item.data(Qt.UserRole)
+            # 1. 파일 경로 (이미지) or 텍스트 내용
+            path_or_text = item.data(Qt.UserRole)
+            # 2. 인터미션 여부
             is_intm = item.data(Qt.UserRole + 1) == True
-            data.append({"path": path, "is_intermission": is_intm})
+            # 3. 아이템 타입 (text vs image) - 없으면 image로 간주
+            item_type = item.data(Qt.UserRole + 2) or "image"
+            # 4. 추가 스타일 정보 (JSON 등)
+            extra_info = item.data(Qt.UserRole + 3)
+
+            data.append({
+                "path": path_or_text, 
+                "is_intermission": is_intm,
+                "type": item_type,
+                "extra": extra_info
+            })
         return data
 
     def start_show(self):
@@ -3432,6 +4089,18 @@ class FullScreenViewer(QWidget):
 
         self.setWindowTitle("악보 쇼 (쇼화면)")
         self.setFocusPolicy(Qt.StrongFocus)
+        
+        # 창을 생성할 때부터 화면 크기로 설정하고 숨김 상태로 유지
+        screens = QApplication.screens()
+        if screens:
+            primary_screen = screens[0]
+            screen_geometry = primary_screen.geometry()
+            self.resize(screen_geometry.width(), screen_geometry.height())
+            self.move(screen_geometry.topLeft())
+        
+        # 창을 숨긴 상태로 유지 (표시 전까지)
+        self.setAttribute(Qt.WA_DontShowOnScreen, True)
+        self.hide()
 
         # 1. 악보 화면 (Scroll Area)
         self.image_label = QLabel()
@@ -3593,6 +4262,172 @@ class FullScreenViewer(QWidget):
                 int(viewer_width * self.zoom), Qt.SmoothTransformation
             )
             self.image_label.setPixmap(scaled)
+            self.image_label.setPixmap(scaled)
+            self.update_next_song_label()
+
+    def get_theme_style(self, theme_name):
+        if not theme_name: theme_name = "기본"
+        if "새벽" in theme_name:
+            return {
+                "bg": "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0f2027, stop:1 #203a43);",
+                "color": "#ffffff"
+            }
+        elif "말씀" in theme_name:
+            return {
+                "bg": "background-color: #f5f5f0;",
+                "color": "#333333"
+            }
+        elif "은혜" in theme_name:
+            return {
+                "bg": "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #23074d, stop:1 #cc5333);",
+                "color": "#333333"
+            }
+        else: # 기본
+            return {
+                "bg": "background-color: #000000;",
+                "color": "#ffffff"
+            }
+
+    def load_image(self):
+        if not self.playlist_data:
+            self.image_label.clear()
+            return
+
+        self.zoom = self.initial_zoom
+        current_data = self.playlist_data[self.current_index]
+        
+        path = current_data["path"]
+        is_intermission = current_data["is_intermission"]
+        item_type = current_data.get("type", "image")
+        extra_info = current_data.get("extra", {})
+
+        # --- [TEXT TYPE 처리] ---
+        # --- [TEXT TYPE 처리] ---
+        if item_type == "text":
+            theme = extra_info.get("theme", "기본")
+            font_size_input = extra_info.get("font_size", 50) # 기본 50
+            font_family = extra_info.get("font_family", "맑은 고딕")
+            style = self.get_theme_style(theme)
+            
+            # 스크롤 영역: 전체 배경
+            self.scroll_area.setStyleSheet(f"{style['bg']} border: none;")
+            
+            # 폰트 크기 계산: 사용자 설정 * 줌 (화면 배율)
+            # Full Screen에서는 줌에 따라 카드가 커지거나 글자가 커져야 함.
+            # 하지만 카드 디자인이므로, 카드의 크기를 고정하거나 비율로 잡고 안의 글자를 키우는 것이 좋음.
+            
+            final_font_size = int(font_size_input * self.zoom)
+
+            # 카드 스타일 적용
+            card_bg = "background-color: rgba(255, 255, 255, 0.9);"
+            border_style = "border: 1px solid #d0d0d0;"
+            radius = "border-radius: 20px;" # 더 둥글게
+            
+            if "Deep Black" in theme or "Midnight" in theme:
+                card_bg = "background-color: rgba(0, 0, 0, 0.4);"
+                border_style = "border: 1px solid rgba(255, 255, 255, 0.2);"
+            
+            # 안쪽 여백 및 바깥 여백
+            padding = "padding: 60px; margin: 50px;"
+
+            self.image_label.setStyleSheet(f"""
+                QLabel {{
+                    {card_bg}
+                    {border_style}
+                    {radius}
+                    color: {style['color']};
+                    {padding}
+                }}
+            """)
+            
+            # 단락 간격 조정을 위해 HTML로 변환
+            html_content = ""
+            # 윈도우/맥/리눅스 줄바꿈 문자 통일
+            safe_text = path.replace("\r\n", "\n").replace("\r", "\n")
+            paragraphs = safe_text.split("\n")
+            
+            for p in paragraphs:
+                if not p.strip():
+                    # 빈 줄은 시각적 공간 확보 (min-height)
+                    html_content += "<p style='margin-bottom: 20px; min-height: 1em;'><br></p>"
+                else:
+                    # 마진을 통해 단락 간격 확보 (line-height는 기본값 or 1.2 등)
+                    # margin-top: 0, margin-bottom: 20px (원하는 간격)
+                    html_content += f"<p style='margin-top: 0px; margin-bottom: 30px; line-height: 1.4;'>{p}</p>"
+            
+            self.image_label.setText(html_content)
+            self.image_label.setWordWrap(True)
+            
+            font = QFont(font_family, final_font_size)
+            font.setBold(True)
+            self.image_label.setFont(font)
+            
+            self.image_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            
+            # 카드 너비 제약 (화면의 80%) -> 중앙 정렬 효과
+            viewport_width = self.scroll_area.viewport().width()
+            target_width = int(viewport_width * 0.8)
+            self.image_label.setFixedWidth(target_width)
+            
+            # 높이는 내용에 따라 자동 조절되지만, 화면 적절한 위치에 오도록
+            self.image_label.adjustSize()
+            
+            # Label 자체를 ScrollArea 가운데 정렬
+            self.scroll_area.setAlignment(Qt.AlignCenter)
+            
+            self.update_next_song_label()
+            return
+
+        # --- [IMAGE TYPE 처리 (기존 로직)] ---
+        # 텍스트 잔재 제거
+        self.image_label.setWordWrap(False)
+
+        # --- [배경색 동적 변경 추가] ---
+        bg_color = "black" if is_intermission else "white"
+        self.scroll_area.setStyleSheet(f"background-color: {bg_color}; border: none;")
+        self.image_label.setStyleSheet(f"background-color: {bg_color};")
+        # -----------------------------
+
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self.image_label.setText("이미지를 불러올 수 없습니다.")
+            return
+
+        view_size = self.scroll_area.viewport().size()
+
+        if is_intermission:
+            # 화면을 가득 채우되, 비율 유지 + 넘치는 부분 crop
+            scaled = pixmap.scaled(
+                view_size,
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation,
+            )
+
+            # 중앙 기준으로 crop
+            x = (scaled.width() - view_size.width()) // 2
+            y = (scaled.height() - view_size.height()) // 2
+            cropped = scaled.copy(
+                x,
+                y,
+                view_size.width(),
+                view_size.height(),
+            )
+
+            self.image_label.setPixmap(cropped)
+            self.image_label.setAlignment(Qt.AlignCenter)
+
+            # 인터미션은 스크롤 없이
+            self.scroll_area.verticalScrollBar().setValue(0)
+            self.scroll_area.horizontalScrollBar().setValue(0)
+            self.next_song_label.hide()
+        else:
+            # --- 일반 악보 모드: 가로 폭 기준 스크롤 ---
+            self.image_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+            viewer_width = view_size.width()
+            scaled = pixmap.scaledToWidth(
+                int(viewer_width * self.zoom), Qt.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled)
             self.update_next_song_label()
 
     def load_image_with_current_zoom(self):
@@ -3603,6 +4438,72 @@ class FullScreenViewer(QWidget):
         current_data = self.playlist_data[self.current_index]
         path = current_data["path"]
         is_intermission = current_data["is_intermission"]
+        item_type = current_data.get("type", "image")
+        extra_info = current_data.get("extra", {})
+
+        # --- [TEXT TYPE 처리] ---
+        # --- [TEXT TYPE 처리] ---
+        if item_type == "text":
+            theme = extra_info.get("theme", "기본")
+            font_size_input = extra_info.get("font_size", 50)
+            font_family = extra_info.get("font_family", "맑은 고딕")
+            style = self.get_theme_style(theme)
+            
+            self.scroll_area.setStyleSheet(f"{style['bg']} border: none;")
+            
+            final_font_size = int(font_size_input * self.zoom)
+
+            card_bg = "background-color: rgba(255, 255, 255, 0.9);"
+            border_style = "border: 1px solid #d0d0d0;"
+            radius = "border-radius: 20px;"
+            
+            if "Deep Black" in theme or "Midnight" in theme:
+                card_bg = "background-color: rgba(0, 0, 0, 0.4);"
+                border_style = "border: 1px solid rgba(255, 255, 255, 0.2);"
+            
+            padding = "padding: 60px; margin: 50px;"
+
+            self.image_label.setStyleSheet(f"""
+                QLabel {{
+                    {card_bg}
+                    {border_style}
+                    {radius}
+                    color: {style['color']};
+                    {padding}
+                }}
+            """)
+
+            # 단락 간격 조정을 위해 HTML로 변환
+            html_content = ""
+            safe_text = path.replace("\r\n", "\n").replace("\r", "\n")
+            paragraphs = safe_text.split("\n")
+            
+            for p in paragraphs:
+                if not p.strip():
+                    html_content += "<p style='margin-bottom: 20px; min-height: 1em;'><br></p>"
+                else:
+                    html_content += f"<p style='margin-top: 0px; margin-bottom: 30px; line-height: 1.4;'>{p}</p>"
+
+            self.image_label.setText(html_content)
+            self.image_label.setWordWrap(True)
+            
+            font = QFont(font_family, final_font_size)
+            font.setBold(True)
+            self.image_label.setFont(font)
+            self.image_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            
+            viewport_width = self.scroll_area.viewport().width()
+            target_width = int(viewport_width * 0.8)
+            self.image_label.setFixedWidth(target_width)
+            self.image_label.adjustSize()
+            
+            self.scroll_area.setAlignment(Qt.AlignCenter)
+            
+            self.update_next_song_label()
+            return
+
+        # --- [IMAGE TYPE 처리] ---
+        self.image_label.setWordWrap(False)
 
         # --- [배경색 동적 변경 추가] ---
         bg_color = "black" if is_intermission else "white"
@@ -3697,7 +4598,14 @@ class FullScreenViewer(QWidget):
     def fit_to_height(self):
         if not self.playlist_data:
             return
-        path = self.playlist_data[self.current_index]["path"]
+        
+        # 텍스트 아이템은 높이 맞춤 기능 제외 (혹은 그냥 리로드)
+        current_data = self.playlist_data[self.current_index]
+        if current_data.get("type", "image") == "text":
+            self.load_image_with_current_zoom()
+            return
+
+        path = current_data["path"]
         pixmap = QPixmap(path)
         if pixmap.isNull():
             return
@@ -3784,14 +4692,18 @@ class FullScreenViewer(QWidget):
 
         next_index = self.current_index + 1
         if 0 <= next_index < len(self.playlist_data):
-            path = self.playlist_data[next_index]["path"]
-            is_intm = self.playlist_data[next_index]["is_intermission"]
-            base_name = os.path.splitext(os.path.basename(path))[0]
+            next_data = self.playlist_data[next_index]
+            is_intm = next_data["is_intermission"]
+            item_type = next_data.get("type", "image")
+            
+            # [수정] 다음 곡이 인터미션이거나 텍스트 슬라이드면 NEXT 라벨 숨김 (요청사항)
+            if is_intm or item_type == "text":
+                self.next_song_label.hide()
+                return
 
-            if is_intm:
-                text = f"NEXT: ☕ {base_name}"
-            else:
-                text = f"NEXT: {base_name}"
+            path = next_data["path"]
+            base_name = os.path.splitext(os.path.basename(path))[0]
+            text = f"NEXT: {base_name}"
 
             self.next_song_label.setText(text)
             self.next_song_label.adjustSize()
@@ -3930,6 +4842,377 @@ class FullScreenViewer(QWidget):
                     v_scroll_bar.setValue(min(v_scroll_bar.maximum(), new_value))
                 return True
         return super().eventFilter(obj, event)
+
+
+# --- [플레이 리스트 곡 통계] 워커 스레드 ---
+class PlaylistStatsWorker(QThread):
+    """플레이 리스트 폴더를 스캔하여 곡별 등장 통계를 수집합니다. 인터미션 제외."""
+    finished = Signal(dict, int)  # song_to_playlists, broken_count
+    progress = Signal(str)
+
+    def __init__(self, playlist_path, sheet_music_path, include_subfolders=True):
+        super().__init__()
+        self.playlist_path = playlist_path
+        self.sheet_music_path = sheet_music_path
+        self.include_subfolders = include_subfolders
+
+    def _collect_pls_files(self):
+        pls_list = []
+        if self.include_subfolders:
+            for root, _dirs, files in os.walk(self.playlist_path):
+                for f in files:
+                    if f.lower().endswith(".pls"):
+                        full = os.path.join(root, f)
+                        rel = os.path.relpath(full, self.playlist_path)
+                        pls_list.append((full, rel))
+        else:
+            try:
+                for name in os.listdir(self.playlist_path):
+                    p = os.path.join(self.playlist_path, name)
+                    if os.path.isfile(p) and name.lower().endswith(".pls"):
+                        pls_list.append((p, name))
+            except OSError:
+                pass
+        return pls_list
+
+    def run(self):
+        song_to_playlists = {}  # full_path -> set of playlist display names
+        broken_count = 0
+        pls_list = self._collect_pls_files()
+        for i, (pls_path, display_name) in enumerate(pls_list):
+            self.progress.emit(f"스캔 중: {display_name}")
+            try:
+                with open(pls_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(data, list):
+                continue
+            for entry in data:
+                if isinstance(entry, str):
+                    path = entry
+                    is_intermission = False
+                else:
+                    path = entry.get("path")
+                    is_intermission = entry.get("is_intermission", False)
+                if is_intermission:
+                    continue
+                if not path:
+                    continue
+                full_path = os.path.normpath(
+                    os.path.join(self.sheet_music_path, path)
+                )
+                if full_path not in song_to_playlists:
+                    song_to_playlists[full_path] = set()
+                song_to_playlists[full_path].add(display_name)
+                if not os.path.isfile(full_path):
+                    broken_count += 1
+        self.finished.emit(song_to_playlists, broken_count)
+
+
+# --- [플레이 리스트 곡 통계] 막대 그래프 위젯 ---
+class BarChartWidget(QWidget):
+    """곡별 등장 횟수를 가로 막대 그래프로 그립니다."""
+
+    barClicked = Signal(str)  # song_name
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data = []  # list of (name, count)
+        self._max_count = 1
+        self.setStyleSheet("background: white;")
+
+    def set_data(self, data):
+        """data: list of (song_name, count)"""
+        self._data = data
+        self._max_count = max((c for _, c in data), default=1)
+
+        # 곡 수에 따라 높이를 늘려 스크롤 영역에서 아래까지 볼 수 있도록 함
+        margin_top = 20
+        margin_bottom = 20
+        bar_height = 22
+        gap = 4
+        n = len(self._data)
+        total_height = margin_top + margin_bottom + max(n, 1) * (bar_height + gap)
+        self.setMinimumHeight(total_height)
+
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._data:
+            painter = QPainter(self)
+            painter.drawText(self.rect(), Qt.AlignCenter, "데이터가 없습니다.")
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        r = self.rect()
+        margin_left = 120
+        margin_right = 40
+        margin_top = 20
+        margin_bottom = 20
+        chart_width = r.width() - margin_left - margin_right
+
+        n = len(self._data)
+        if n <= 0:
+            return
+
+        bar_height = 22
+        gap = 4
+
+        for i, (name, count) in enumerate(self._data):
+            y = margin_top + i * (bar_height + gap)
+            # 곡명
+            text_rect = QRect(4, y, margin_left - 8, bar_height)
+            short_name = name if len(name) <= 18 else name[:15] + "..."
+            painter.setPen(QColor(0, 0, 0))
+            # 제목을 좌측 정렬로 표시
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, short_name)
+            # 막대
+            bar_x = margin_left
+            w = (count / self._max_count) * chart_width if self._max_count else 0
+            bar_rect = QRect(int(bar_x), y, int(w), bar_height)
+            painter.fillRect(bar_rect, QColor(70, 130, 180))
+            painter.setPen(QColor(50, 100, 150))
+            painter.drawRect(bar_rect)
+            # 횟수
+            painter.drawText(
+                bar_rect.adjusted(4, 0, 4, 0),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                str(count),
+            )
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if not self._data:
+            return
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        margin_top = 20
+        bar_height = 22
+        gap = 4
+        n = len(self._data)
+        for i, (name, _count) in enumerate(self._data):
+            y = margin_top + i * (bar_height + gap)
+            bar_rect = QRect(0, y, self.width(), bar_height)
+            if bar_rect.contains(pos):
+                self.barClicked.emit(name)
+                break
+
+
+# --- [플레이 리스트 곡 통계] 다이얼로그 ---
+class PlaylistSongStatsDialog(QDialog):
+    """곡 기준 플레이 리스트 통계: 요약 카드, 테이블/그래프 탭, 곡 선택 시 포함 리스트 목록."""
+
+    def __init__(self, playlist_path, sheet_music_path, parent=None):
+        super().__init__(parent)
+        self.playlist_path = playlist_path
+        self.sheet_music_path = sheet_music_path
+        self.song_to_playlists = {}  # full_path -> set of playlist names
+        self.broken_count = 0
+        self.include_subfolders = True
+        self.setWindowTitle("플레이 리스트 곡 통계")
+        self.setMinimumSize(700, 500)
+        self.resize(850, 600)
+        self._build_ui()
+        self._worker = None
+        QTimer.singleShot(0, self._start_scan)
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # 요약 카드
+        cards_layout = QHBoxLayout()
+        self.card_songs = QLabel("총 곡 수: -")
+        self.card_songs.setStyleSheet(
+            "font-weight: bold; font-size: 13pt; padding: 8px;"
+        )
+        self.card_appearances = QLabel("총 등장 횟수: -")
+        self.card_appearances.setStyleSheet(
+            "font-weight: bold; font-size: 13pt; padding: 8px;"
+        )
+        self.card_broken = QLabel("깨진 경로: -")
+        self.card_broken.setStyleSheet(
+            "font-weight: bold; font-size: 13pt; padding: 8px;"
+        )
+        cards_layout.addWidget(self.card_songs)
+        cards_layout.addWidget(self.card_appearances)
+        cards_layout.addWidget(self.card_broken)
+        cards_layout.addStretch()
+        layout.addLayout(cards_layout)
+
+        # 옵션: Top N, 정렬
+        opt_layout = QHBoxLayout()
+        opt_layout.addWidget(QLabel("상위 표시:"))
+        self.spin_top = QSpinBox()
+        self.spin_top.setRange(10, 500)
+        self.spin_top.setValue(50)
+        self.spin_top.valueChanged.connect(self._refresh_views)
+        opt_layout.addWidget(self.spin_top)
+        opt_layout.addWidget(QLabel("정렬:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["등장 횟수 내림차순", "곡명 가나다"])
+        self.sort_combo.currentIndexChanged.connect(self._refresh_views)
+        opt_layout.addWidget(self.sort_combo)
+        opt_layout.addStretch()
+        layout.addLayout(opt_layout)
+
+        # 탭: 테이블 / 그래프
+        self.tab_widget = QTabWidget()
+        # 테이블 탭
+        table_tab = QWidget()
+        table_tab_layout = QVBoxLayout(table_tab)
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["순위", "곡명", "등장 횟수"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        table_tab_layout.addWidget(self.table)
+        self.tab_widget.addTab(table_tab, "테이블")
+        # 그래프 탭
+        graph_tab = QWidget()
+        graph_tab_layout = QVBoxLayout(graph_tab)
+        self.bar_chart = BarChartWidget()
+        self.bar_chart.barClicked.connect(self._on_bar_clicked)
+        graph_scroll = QScrollArea()
+        graph_scroll.setWidgetResizable(True)
+        graph_scroll.setWidget(self.bar_chart)
+        graph_tab_layout.addWidget(graph_scroll)
+        self.tab_widget.addTab(graph_tab, "그래프")
+        layout.addWidget(self.tab_widget)
+
+        # 선택 곡의 포함 리스트 목록
+        self.detail_label = QLabel("곡을 선택하면 해당 곡이 포함된 리스트가 표시됩니다.")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet("padding: 6px; background: #f0f0f0; border-radius: 4px;")
+        layout.addWidget(self.detail_label)
+
+        # 진행 표시
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        # 버튼
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btn_refresh = QPushButton("새로 고침")
+        self.btn_refresh.clicked.connect(self._start_scan)
+        self.btn_close = QPushButton("닫기")
+        self.btn_close.clicked.connect(self.accept)
+        btn_layout.addWidget(self.btn_refresh)
+        btn_layout.addWidget(self.btn_close)
+        layout.addLayout(btn_layout)
+
+    def _start_scan(self):
+        self.btn_refresh.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.table.setRowCount(0)
+        self.bar_chart.set_data([])
+        self.detail_label.setText("스캔 중…")
+        self._worker = PlaylistStatsWorker(
+            self.playlist_path,
+            self.sheet_music_path,
+            include_subfolders=self.include_subfolders,
+        )
+        self._worker.progress.connect(
+            lambda t: self.detail_label.setText(t)
+        )
+        self._worker.finished.connect(self._on_scan_finished)
+        self._worker.start()
+
+    def _on_scan_finished(self, song_to_playlists, broken_count):
+        self._worker = None
+        self.btn_refresh.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.song_to_playlists = song_to_playlists
+        self.broken_count = broken_count
+        self._update_summary()
+        self._refresh_views()
+        self.detail_label.setText("곡을 선택하면 해당 곡이 포함된 리스트가 표시됩니다.")
+
+    def _update_summary(self):
+        total_songs = len(self.song_to_playlists)
+        total_appearances = sum(
+            len(plists) for plists in self.song_to_playlists.values()
+        )
+        self.card_songs.setText(f"총 곡 수: {total_songs}")
+        self.card_appearances.setText(f"총 등장 횟수: {total_appearances}")
+        self.card_broken.setText(f"깨진 경로: {self.broken_count}")
+
+    def _get_sorted_rows(self):
+        """옵션에 따라 정렬된 (name, count, full_path, plists) 리스트 반환."""
+        if not self.song_to_playlists:
+            return []
+        top_n = self.spin_top.value()
+        by_count = self.sort_combo.currentIndex() == 0
+        rows = []
+        for full_path, plists in self.song_to_playlists.items():
+            name = os.path.splitext(os.path.basename(full_path))[0]
+            count = len(plists)
+            rows.append((name, count, full_path, plists))
+        if by_count:
+            rows.sort(key=lambda x: (-x[1], x[0]))
+        else:
+            rows.sort(key=lambda x: x[0])
+        return rows[:top_n]
+
+    def _refresh_views(self):
+        rows = self._get_sorted_rows()
+        if not rows:
+            self.table.setRowCount(0)
+            self.bar_chart.set_data([])
+            return
+        self.table.setRowCount(len(rows))
+        for i, (name, count, full_path, plists) in enumerate(rows):
+            self.table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.table.setItem(i, 1, QTableWidgetItem(name))
+            self.table.setItem(i, 2, QTableWidgetItem(str(count)))
+            self.table.item(i, 1).setData(Qt.UserRole, (full_path, plists))
+        self.table.clearSelection()
+        self.bar_chart.set_data([(name, count) for name, count, _, _ in rows])
+        self.detail_label.setText("곡을 선택하면 해당 곡이 포함된 리스트가 표시됩니다.")
+
+    def _on_bar_clicked(self, song_name: str):
+        """그래프 막대를 클릭했을 때 해당 곡의 리스트 정보를 표시합니다."""
+        rows = self._get_sorted_rows()
+        target_row = -1
+        plists = None
+        for i, (name, _count, _full_path, pls) in enumerate(rows):
+            if name == song_name:
+                target_row = i
+                plists = pls
+                break
+        if target_row >= 0 and plists is not None:
+            # 테이블 선택도 동기화
+            if self.table.rowCount() > target_row:
+                self.table.selectRow(target_row)
+            names = sorted(plists)
+            text = "이 곡이 포함된 리스트 (" + str(len(names)) + "개):\n" + "\n".join(
+                "  • " + n for n in names
+            )
+            self.detail_label.setText(text)
+
+    def _on_selection_changed(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        item = self.table.item(row, 1)
+        if not item:
+            return
+        data = item.data(Qt.UserRole)
+        if not data:
+            return
+        _full_path, plists = data
+        names = sorted(plists)
+        text = "이 곡이 포함된 리스트 (" + str(len(names)) + "개):\n" + "\n".join(
+            "  • " + n for n in names
+        )
+        self.detail_label.setText(text)
 
 
 if __name__ == "__main__":
