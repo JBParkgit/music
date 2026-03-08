@@ -1,5 +1,7 @@
-pyinstaller --name musicsheetviewer --icon=musicsheet.ico --noconsole --onedir viewer8.py
 pyinstaller --name musicsheetviewer --icon=musicsheet.ico --noconsole --onedir --add-data "musicsheet.ico;." --add-data "music.ico;." viewer12.py
 pyinstaller --name sheetcapture --icon=capture_icon.ico --noconsole --onedir --contents-directory "lib_capture" --add-data "capture_icon.ico;." capture4.py
 
 --contents-directory "lib_capture"
+
+pyinstaller musicsheetviewer.spec --clean -y
+pyinstaller sheetcapture.spec --clean -y
