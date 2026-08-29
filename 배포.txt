@@ -1,7 +1,17 @@
-pyinstaller --name musicsheetviewer --icon=musicsheet.ico --noconsole --onedir --add-data "musicsheet.ico;." --add-data "music.ico;." viewer12.py
-pyinstaller --name sheetcapture --icon=capture_icon.ico --noconsole --onedir --contents-directory "lib_capture" --add-data "capture_icon.ico;." capture4.py
+배포판 빌드 (권장):
+    venv\Scripts\python.exe build_dist.py
 
---contents-directory "lib_capture"
+위 스크립트가 아래 과정을 전부 자동으로 처리합니다.
+- musicsheetviewer.spec / sheetcapture.spec 각각 --clean -y 로 빌드
+- sheetcapture.exe + lib_capture를 dist/musicsheetviewer 안으로 합침
+- service_account.json, song_metadata.db(공유 파일) 포함
+- settings.json, song_titles.db(PC별 로컬 전용 파일)는 절대 포함되지 않도록 제거
+- dist/musicsheetviewer.zip 으로 압축 + 검증
 
+--- 참고용: 스크립트가 내부적으로 실행하는 개별 명령 ---
 pyinstaller musicsheetviewer.spec --clean -y
 pyinstaller sheetcapture.spec --clean -y
+
+--- 최초 spec 파일이 없었을 때 사용한 원본 명령(참고용, 지금은 spec 사용) ---
+pyinstaller --name musicsheetviewer --icon=musicsheet.ico --noconsole --onedir --add-data "musicsheet.ico;." --add-data "music.ico;." viewer12.py
+pyinstaller --name sheetcapture --icon=capture_icon.ico --noconsole --onedir --contents-directory "lib_capture" --add-data "capture_icon.ico;." capture4.py

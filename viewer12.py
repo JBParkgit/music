@@ -8,6 +8,7 @@ import sqlite3
 import webbrowser
 import urllib.parse
 import subprocess
+from collections import defaultdict
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -101,13 +102,15 @@ except ImportError:
 class CustomSortFilterProxyModel(QSortFilterProxyModel):
     itemRenamed = Signal(str)
 
-    def __init__(self, extensions, favorites, metadata_cache, parent=None):
+    def __init__(self, extensions, metadata_cache, parent=None, title_cache=None):
         super().__init__(parent)
         self.extensions = extensions
-        self.favorites = favorites
         self.metadata_cache = metadata_cache
+        # title_cache가 주어진 트리(악보 트리)는 이름 변경 시 실제 파일명/Drive를 건드리지
+        # 않고 개인 제목 오버레이만 저장합니다. None이면(플레이리스트 트리) 기존처럼
+        # 실제 os.rename을 수행합니다.
+        self.title_cache = title_cache
         self.lyrics_filter_set = None
-        self.favorites_only_mode = False
         self.key_filter = "전체"
         self._filter_regex = QRegularExpression("")
         self.setRecursiveFilteringEnabled(False)
@@ -117,7 +120,7 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
         if not index.isValid():
             return super().data(index, role)
 
-        source_index = self.mapToSource(index)
+        source_index = self.mapToSource(index) if index.model() == self else index
         source_model = self.sourceModel()
 
         if role == Qt.UserRole:
@@ -134,16 +137,37 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
             file_name = source_model.fileName(source_index)
             if not source_model.isDir(source_index):
                 file_path = source_model.filePath(source_index)
-                if file_path in self.favorites:
-                    return f"⭐ {file_name}"
-                else:
-                    return file_name
+                display_name = file_name
+                if self.title_cache is not None:
+                    base, ext = os.path.splitext(file_name)
+                    norm_p = os.path.normpath(file_path)
+                    # 1순위: 개인 로컬 오버레이
+                    title = self.title_cache.get(norm_p)
+                    # 2순위: 중앙 메타데이터 표준 제목
+                    if not title and self.metadata_cache:
+                        meta = self.metadata_cache.get(norm_p)
+                        if meta and len(meta) > 2 and meta[2]:
+                            title = meta[2]
+                    if title:
+                        display_name = f"{title}{ext}"
+                return display_name
             return file_name
 
         if role == Qt.EditRole:
             file_name = source_model.fileName(source_index)
             if not source_model.isDir(source_index):
-                return os.path.splitext(file_name)[0]
+                base_name = os.path.splitext(file_name)[0]
+                if self.title_cache is not None:
+                    file_path = source_model.filePath(source_index)
+                    norm_p = os.path.normpath(file_path)
+                    title = self.title_cache.get(norm_p)
+                    if not title and self.metadata_cache:
+                        meta = self.metadata_cache.get(norm_p)
+                        if meta and len(meta) > 2 and meta[2]:
+                            title = meta[2]
+                    if title:
+                        return title
+                return base_name
             else:
                 return file_name
 
@@ -170,12 +194,6 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
                 return True
             else:
                 return file_path in self.lyrics_filter_set
-
-        if self.favorites_only_mode:
-            if is_dir:
-                return True
-            else:
-                return file_path in self.favorites
 
         if is_dir:
             return True
@@ -205,36 +223,109 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
                 return file_path.lower().endswith(tuple(self.extensions))
 
             name_matches = self._filter_regex.match(base_name).hasMatch()
+            if not name_matches and self.title_cache is not None:
+                norm_p = os.path.normpath(file_path)
+                title = self.title_cache.get(norm_p)
+                if not title and self.metadata_cache:
+                    meta = self.metadata_cache.get(norm_p)
+                    if meta and len(meta) > 2 and meta[2]:
+                        title = meta[2]
+                if title:
+                    name_matches = self._filter_regex.match(title).hasMatch()
             return name_matches and file_path.lower().endswith(tuple(self.extensions))
 
-    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
-        """날짜 열(3) 정렬 시 파일 수정 시간 기준으로 비교합니다."""
+    def _name_sort_key(self, source_index):
+        """QSortFilterProxyModel의 기본 lessThan은 원본 모델(QFileSystemModel)의
+        데이터를 직접 읽기 때문에, 프록시의 data()가 제공하는 개인 제목 오버레이를
+        무시하고 실제 파일명으로만 정렬해버립니다. 그래서 정렬 키를 직접 계산합니다."""
         source_model = self.sourceModel()
+        file_name = source_model.fileName(source_index)
+        if source_model.isDir(source_index):
+            return file_name
+        if self.title_cache is not None:
+            file_path = source_model.filePath(source_index)
+            norm_p = os.path.normpath(file_path)
+            title = self.title_cache.get(norm_p)
+            if not title and self.metadata_cache:
+                meta = self.metadata_cache.get(norm_p)
+                if meta and len(meta) > 2 and meta[2]:
+                    title = meta[2]
+            if title:
+                return title
+        return file_name
 
-        # 날짜 컬럼(3)일 때는 파일의 수정 시간을 기준으로 비교
-        if left.column() == 3 and right.column() == 3:
-            try:
-                left_index0 = source_model.index(left.row(), 0, left.parent())
-                right_index0 = source_model.index(right.row(), 0, right.parent())
-                path_left = source_model.filePath(left_index0)
-                path_right = source_model.filePath(right_index0)
-                t_left = os.path.getmtime(path_left) if os.path.exists(path_left) else 0
-                t_right = os.path.getmtime(path_right) if os.path.exists(path_right) else 0
-                return t_left < t_right  # 오름차순 기준, 내림차순은 프록시가 자동 반전
-            except (OSError, TypeError):
-                pass
+    def _key_sort_key(self, source_index):
+        source_model = self.sourceModel()
+        if source_model.isDir(source_index):
+            return ""
+        file_path = source_model.filePath(source_index)
+        song_key = self.metadata_cache.get(file_path, ("", ""))[0]
+        return song_key or ""
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        """QSortFilterProxyModel.lessThan의 인자 left, right는 이미 sourceModel()의 인덱스입니다."""
+        source_model = self.sourceModel()
+        left_source = left
+        right_source = right
+
+        # 이름 열(0) 정렬 시: 디렉토리 우선 -> 커스텀 이름(제목 오버레이/중앙 표준 제목) 기준 정렬
+        if left_source.column() == 0:
+            left_is_dir = source_model.isDir(left_source)
+            right_is_dir = source_model.isDir(right_source)
+            if left_is_dir != right_is_dir:
+                return left_is_dir and not right_is_dir
+            left_key = self._name_sort_key(left_source)
+            right_key = self._name_sort_key(right_source)
+            return left_key.lower() < right_key.lower()
+
+        # Key 열(1) 정렬 시: 디렉토리 우선 -> Key 문자열 기준 정렬
+        if left_source.column() == 1:
+            left_is_dir = source_model.isDir(left_source)
+            right_is_dir = source_model.isDir(right_source)
+            if left_is_dir != right_is_dir:
+                return left_is_dir and not right_is_dir
+            return self._key_sort_key(left_source) < self._key_sort_key(right_source)
+
+        if left_source.column() == 3:
+            left_info = source_model.fileInfo(left_source)
+            right_info = source_model.fileInfo(right_source)
+            return left_info.lastModified() < right_info.lastModified()
 
         return super().lessThan(left, right)
 
     def flags(self, index):
         default_flags = super().flags(index)
-        if index.isValid():
+        if index.isValid() and index.column() == 0:
             return default_flags | Qt.ItemIsEditable
         return default_flags
 
     def setData(self, index, value, role=Qt.EditRole):
+        if role == Qt.EditRole and index.isValid() and self.title_cache is not None:
+            source_index = self.mapToSource(index) if index.model() == self else index
+            path = self.sourceModel().filePath(source_index)
+            if not os.path.isfile(path):
+                return False
+
+            new_title = value.strip()
+            parent_window = self.parent()
+
+            if new_title:
+                if parent_window:
+                    parent_window.set_title_in_db(path, new_title)
+                else:
+                    self.title_cache[os.path.normpath(path)] = new_title
+            else:
+                if parent_window:
+                    parent_window.clear_title_in_db(path)
+                else:
+                    self.title_cache.pop(os.path.normpath(path), None)
+
+            self.itemRenamed.emit(path)
+            self.invalidate()
+            return True
+
         if role == Qt.EditRole and index.isValid():
-            source_index = self.mapToSource(index)
+            source_index = self.mapToSource(index) if index.model() == self else index
             old_path = self.sourceModel().filePath(source_index)
 
             if not os.path.isfile(old_path):
@@ -259,12 +350,6 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
 
             try:
                 os.rename(old_path, new_path)
-                if old_path in self.favorites:
-                    self.favorites.remove(old_path)
-                    self.favorites.add(new_path)
-                    if self.parent():
-                        self.parent().save_favorites()
-
                 old_norm = os.path.normpath(old_path)
                 new_norm = os.path.normpath(new_path)
                 if old_norm in self.metadata_cache:
@@ -306,12 +391,6 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
     def setFilterRegularExpression(self, pattern: QRegularExpression):
         self._filter_regex = pattern
         self.invalidateFilter()
-
-    def set_favorites_only_mode(self, enabled):
-        self.favorites_only_mode = enabled
-        self.invalidateFilter()
-
-
 # --- [구글 드라이브 헬퍼 클래스] ---
 class GoogleDriveSync:
     def __init__(self, service_account_file, local_dir, drive_folder_id, app_dir):
@@ -772,6 +851,8 @@ class MetadataSyncThread(QThread):
         cur = con.cursor()
         cur.execute("PRAGMA table_info(song_metadata)")
         cols = {row[1] for row in cur.fetchall()}
+        if "display_title" not in cols:
+            cur.execute("ALTER TABLE song_metadata ADD COLUMN display_title TEXT")
         if "updated_at" not in cols:
             cur.execute("ALTER TABLE song_metadata ADD COLUMN updated_at TEXT")
         if "updated_by" not in cols:
@@ -825,6 +906,7 @@ class MetadataSyncThread(QThread):
                     file_path TEXT PRIMARY KEY,
                     song_key TEXT,
                     lyrics TEXT,
+                    display_title TEXT,
                     updated_at TEXT,
                     updated_by TEXT,
                     dirty INTEGER DEFAULT 0
@@ -869,20 +951,22 @@ class MetadataSyncThread(QThread):
 
                     song_key = (row.get("song_key") or "").strip()
                     lyrics = (row.get("lyrics") or "").strip()
+                    display_title = (row.get("display_title") or row.get("title") or row.get("곡제목") or "").strip()
                     updated_at = (row.get("updated_at") or "").strip() or now
                     updated_by = (row.get("updated_by") or "").strip()
 
-                    batch.append((rel_path, song_key, lyrics, updated_at, updated_by))
+                    batch.append((rel_path, song_key, lyrics, display_title, updated_at, updated_by))
                 if batch:
                     # dirty 여부와 관계없이 항상 온라인 CSV 기준으로 덮어씁니다.
                     for rec in batch:
                         cur.execute(
                             """
-                            INSERT INTO song_metadata (file_path, song_key, lyrics, updated_at, updated_by, dirty)
-                            VALUES (?, ?, ?, ?, ?, 0)
+                            INSERT INTO song_metadata (file_path, song_key, lyrics, display_title, updated_at, updated_by, dirty)
+                            VALUES (?, ?, ?, ?, ?, ?, 0)
                             ON CONFLICT(file_path) DO UPDATE SET
                                 song_key=excluded.song_key,
                                 lyrics=excluded.lyrics,
+                                display_title=excluded.display_title,
                                 updated_at=excluded.updated_at,
                                 updated_by=excluded.updated_by,
                                 dirty=0
@@ -900,8 +984,6 @@ class MetadataSyncThread(QThread):
 
         except Exception as e:
             self.finished_signal.emit(False, 0, f"DB 동기화 오류: {str(e)}")
-
-
 # --- [로컬 -> 중앙(스프레드시트) 업로드 스레드] ---
 class MetadataUploadThread(QThread):
     """로컬 DB에서 dirty=1 인 항목을 중앙 스프레드시트에 upsert(행 업데이트/추가)합니다."""
@@ -1385,6 +1467,133 @@ class TextSlideDialog(QDialog):
                 "color": "#ffffff"
             }
 
+# --- [연관 찬양 추천 엔진] ---
+class PlaylistRelationEngine:
+    """플레이리스트(.pls) 히스토리를 분석하여 함께 선곡되거나 이어서 나온 곡들을 추천합니다."""
+
+    def __init__(self, playlist_path, sheet_music_path):
+        self.playlist_path = playlist_path
+        self.sheet_music_path = sheet_music_path
+        self.co_occurrences = {}  # norm_path -> {other_norm_path: count}
+        self.next_transitions = {}  # norm_path -> {next_norm_path: count}
+        self.total_playlists_scanned = 0
+
+    def _resolve_song_path(self, raw_path, filename_map):
+        if not raw_path:
+            return ""
+        if os.path.isabs(raw_path) and os.path.isfile(raw_path):
+            return os.path.normpath(raw_path)
+        cand = os.path.normpath(os.path.join(self.sheet_music_path, raw_path))
+        if os.path.isfile(cand):
+            return cand
+        base = os.path.basename(raw_path).lower()
+        if base in filename_map:
+            return filename_map[base]
+        return cand
+
+    def scan_all_playlists(self):
+        """playlist_path 폴더(하위 포함)의 모든 .pls 파일을 파싱하여 연관 관계 인덱스를 구축합니다."""
+        co_occur = defaultdict(lambda: defaultdict(int))
+        next_trans = defaultdict(lambda: defaultdict(int))
+        count = 0
+
+        filename_map = {}
+        if os.path.isdir(self.sheet_music_path):
+            for root, _dirs, files in os.walk(self.sheet_music_path):
+                for f in files:
+                    filename_map[f.lower()] = os.path.normpath(os.path.join(root, f))
+
+        if not os.path.isdir(self.playlist_path):
+            self.co_occurrences = {}
+            self.next_transitions = {}
+            self.total_playlists_scanned = 0
+            return
+
+        for root, _dirs, files in os.walk(self.playlist_path):
+            for f in files:
+                if f.lower().endswith(".pls"):
+                    full = os.path.join(root, f)
+                    try:
+                        with open(full, "r", encoding="utf-8") as fp:
+                            data = json.load(fp)
+                    except Exception:
+                        continue
+                    if not isinstance(data, list):
+                        continue
+
+                    song_paths = []
+                    for entry in data:
+                        if isinstance(entry, str):
+                            p = entry
+                            is_intermission = False
+                        elif isinstance(entry, dict):
+                            if entry.get("type") == "text":
+                                continue
+                            p = entry.get("path")
+                            is_intermission = entry.get("is_intermission", False)
+                        else:
+                            continue
+
+                        if is_intermission or not p:
+                            continue
+
+                        full_song = self._resolve_song_path(p, filename_map)
+                        if os.path.isfile(full_song):
+                            song_paths.append(full_song)
+
+                    # 같은 플레이리스트에 함께 등장한 곡 (co-occurrence)
+                    unique_songs = list(dict.fromkeys(song_paths))
+                    for i, s1 in enumerate(unique_songs):
+                        for s2 in unique_songs[i + 1:]:
+                            co_occur[s1][s2] += 1
+                            co_occur[s2][s1] += 1
+
+                    # 바로 다음에 이어서 나온 곡 (transition)
+                    for i in range(len(song_paths) - 1):
+                        s1 = song_paths[i]
+                        s2 = song_paths[i + 1]
+                        if s1 != s2:
+                            next_trans[s1][s2] += 1
+
+                    count += 1
+
+        self.co_occurrences = {k: dict(v) for k, v in co_occur.items()}
+        self.next_transitions = {k: dict(v) for k, v in next_trans.items()}
+        self.total_playlists_scanned = count
+
+    def get_related_songs(self, song_path, current_cue_paths=None, limit=15):
+        """song_path와 가장 연관도 높은 곡들의 리스트 반환"""
+        norm_target = os.path.normpath(
+            song_path if os.path.isabs(song_path) else os.path.join(self.sheet_music_path, song_path)
+        )
+        related_dict = self.co_occurrences.get(norm_target, {})
+        next_dict = self.next_transitions.get(norm_target, {})
+
+        if not related_dict and not next_dict:
+            return []
+
+        all_candidates = set(related_dict.keys()) | set(next_dict.keys())
+        current_cue_set = set(os.path.normpath(p) for p in (current_cue_paths or []))
+
+        results = []
+        for cand in all_candidates:
+            if not os.path.isfile(cand):
+                continue
+            co_cnt = related_dict.get(cand, 0)
+            next_cnt = next_dict.get(cand, 0)
+            score = (next_cnt * 3) + co_cnt
+            results.append({
+                "path": cand,
+                "co_count": co_cnt,
+                "next_count": next_cnt,
+                "score": score,
+                "in_cue": cand in current_cue_set
+            })
+
+        results.sort(key=lambda x: (x["in_cue"], -x["score"], -x["next_count"], -x["co_count"]))
+        return results[:limit]
+
+
 class PraiseSheetViewer(QMainWindow):
 
     # --- [헬퍼 메서드 수정] ---
@@ -1414,7 +1623,7 @@ class PraiseSheetViewer(QMainWindow):
     # --- [__init__ 메서드 수정: 초기 크기 지정] ---
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("물댄동산 악보 뷰어 Pet1 2:9 V5.0")
+        self.setWindowTitle("물댄동산 악보 뷰어 Pet1 2:9 V5.4")
 
         # 초기 크기를 넉넉히 잡아 윈도우 매니저가 배치할 때 깜빡임 최소화
         self.resize(1600, 900)
@@ -1438,6 +1647,7 @@ class PraiseSheetViewer(QMainWindow):
             self.app_dir = os.path.dirname(os.path.abspath(__file__))
 
         self.db_path = os.path.join(self.app_dir, "song_metadata.db")
+        self.title_db_path = os.path.join(self.app_dir, "song_titles.db")
         self.init_database()
 
         # --- 아이콘 및 설정 로드 ---
@@ -1451,14 +1661,18 @@ class PraiseSheetViewer(QMainWindow):
         self.settings_file = os.path.join(self.app_dir, "settings.json")
         self.themes = self.get_themes()
         self.load_settings()
+        self.rebuild_filename_cache()
 
         # load_settings 이후에 메타데이터 캐시 로드 (sheet_music_path 필요)
         self.metadata_cache = self.load_all_metadata_from_db()
+        # 이 PC 전용 제목 오버레이 캐시 (Drive에는 절대 올라가지 않는 로컬 전용 값)
+        self.title_cache = self.load_all_titles_from_db()
 
-        self.favorites = set()
-        self.favorites_file = os.path.join(self.app_dir, "favorites.json")
-        self.load_favorites()
-        self.favorites_view_active = False
+        # --- [연관 찬양 추천 엔진 초기화] ---
+        self.relation_engine = PlaylistRelationEngine(
+            self.playlist_path, self.sheet_music_path
+        )
+        self.relation_engine.scan_all_playlists()
 
         # --- 파일 시스템 모델 ---
         self.image_extensions = [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"]
@@ -1469,7 +1683,10 @@ class PraiseSheetViewer(QMainWindow):
         self.model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
 
         self.proxy_model = CustomSortFilterProxyModel(
-            self.all_extensions, self.favorites, self.metadata_cache, self
+            self.all_extensions,
+            self.metadata_cache,
+            self,
+            title_cache=self.title_cache,
         )
         self.proxy_model.setSourceModel(self.model)
         self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
@@ -1478,9 +1695,7 @@ class PraiseSheetViewer(QMainWindow):
         self.playlist_model = QFileSystemModel()
         self.playlist_model.setRootPath(self.playlist_path)
         self.playlist_model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Files)
-        self.playlist_proxy_model = CustomSortFilterProxyModel(
-            [".pls"], set(), {}, self
-        )
+        self.playlist_proxy_model = CustomSortFilterProxyModel([".pls"], {}, self)
         self.playlist_proxy_model.setSourceModel(self.playlist_model)
         self.playlist_proxy_model.itemRenamed.connect(
             self.update_selection_after_rename
@@ -1761,8 +1976,6 @@ class PraiseSheetViewer(QMainWindow):
             self.btn_push_db.setEnabled(False)
 
         db_buttons_layout = QHBoxLayout()
-        db_buttons_layout.addWidget(self.btn_sync_drive)
-        db_buttons_layout.addWidget(self.btn_launch_capture)
         db_buttons_layout.addStretch()
         db_buttons_layout.addWidget(self.btn_sync_db)
         db_buttons_layout.addWidget(self.btn_push_db)
@@ -1789,26 +2002,10 @@ class PraiseSheetViewer(QMainWindow):
         self.inspector_lyrics_edit.installEventFilter(self)
         self.load_metadata_to_inspector(None)
 
-        # --- 5. 즐겨찾기 및 선택 버튼 ---
-        self.btn_add_favorite = QPushButton()
-        self.set_icon_button(self.btn_add_favorite, "⭐+", "즐겨찾기 추가", "추가")
-        self.btn_add_favorite.clicked.connect(self.add_current_to_favorites)
-
-        self.btn_remove_favorite = QPushButton()
-        self.set_icon_button(self.btn_remove_favorite, "⭐-", "즐겨찾기 삭제", "삭제")
-        self.btn_remove_favorite.clicked.connect(self.remove_current_from_favorites)
-
-        self.btn_toggle_favorites_view = QPushButton()
-        self.set_icon_button(
-            self.btn_toggle_favorites_view, "⭐List", "즐겨찾기 모드 보기", "모아보기"
-        )
-        self.btn_toggle_favorites_view.setCheckable(True)
-        self.btn_toggle_favorites_view.clicked.connect(self.toggle_favorites_view)
-
-        favorites_button_layout = QHBoxLayout()
-        favorites_button_layout.addWidget(self.btn_add_favorite)
-        favorites_button_layout.addWidget(self.btn_remove_favorite)
-        favorites_button_layout.addWidget(self.btn_toggle_favorites_view)
+        # --- 5. 악보 도구 및 선택 버튼 ---
+        sheet_sync_tools_layout = QHBoxLayout()
+        sheet_sync_tools_layout.addWidget(self.btn_sync_drive)
+        sheet_sync_tools_layout.addWidget(self.btn_launch_capture)
 
         self.btn_add_selected = QPushButton()
         self.set_icon_button(
@@ -1825,18 +2022,65 @@ class PraiseSheetViewer(QMainWindow):
         self.list_widget = QListWidget()
         self.list_widget.setSpacing(0)
         self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)
+        self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_widget.setTextElideMode(Qt.ElideRight)
         self.list_widget.setDragEnabled(True)
         self.list_widget.setAcceptDrops(True)
         self.list_widget.setDragDropMode(QListWidget.InternalMove)
         self.list_widget.setUniformItemSizes(True)
         self.list_widget.itemDoubleClicked.connect(self.handle_list_double_click)
         self.list_widget.itemClicked.connect(self.handle_list_click)
+        self.list_widget.currentItemChanged.connect(
+            lambda current, prev: self.handle_list_click(current) if current else self.clear_recommendations()
+        )
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(
             self.show_list_widget_context_menu
         )
         self.list_widget.setMouseTracking(True)
         self.list_widget.mouseMoveEvent = self.list_widget_mouse_move_event
+
+        # --- [연관 찬양 추천 서브 카드 UI] ---
+        self.recommend_container = QWidget()
+        self.recommend_container.setObjectName("recommendCard")
+        rec_main_layout = QVBoxLayout(self.recommend_container)
+        rec_main_layout.setContentsMargins(10, 8, 10, 8)
+        rec_main_layout.setSpacing(6)
+
+        rec_header_layout = QHBoxLayout()
+        self.rec_title_label = QLabel("💡 큐시트 곡 선택 시 연관 찬양 추천")
+        self.rec_title_label.setObjectName("recTitle")
+        self.rec_title_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+
+        self.btn_add_rec_song = QPushButton("＋ 큐시트에 추가")
+        self.btn_add_rec_song.setObjectName("recAddBtn")
+        self.btn_add_rec_song.setToolTip("추천 목록에서 선택한 찬양을 현재 큐시트에 바로 추가합니다.")
+        self.btn_add_rec_song.setEnabled(False)
+        self.btn_add_rec_song.clicked.connect(self.add_selected_recommendation_to_cue_sheet)
+
+        rec_header_layout.addWidget(self.rec_title_label)
+        rec_header_layout.addStretch()
+        rec_header_layout.addWidget(self.btn_add_rec_song)
+        rec_main_layout.addLayout(rec_header_layout)
+
+        self.rec_list_widget = QListWidget()
+        self.rec_list_widget.setObjectName("recListWidget")
+        self.rec_list_widget.setSpacing(0)
+        self.rec_list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.rec_list_widget.setTextElideMode(Qt.ElideRight)
+        self.rec_list_widget.setUniformItemSizes(True)
+        self.rec_list_widget.itemClicked.connect(self.handle_rec_item_click)
+        self.rec_list_widget.itemDoubleClicked.connect(self.handle_rec_item_double_click)
+        self.rec_list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.rec_list_widget.customContextMenuRequested.connect(self.show_rec_context_menu)
+        rec_main_layout.addWidget(self.rec_list_widget)
+
+        self.cue_splitter = QSplitter(Qt.Vertical)
+        self.cue_splitter.setObjectName("cueSplitter")
+        self.cue_splitter.addWidget(self.list_widget)
+        self.cue_splitter.addWidget(self.recommend_container)
+        self.cue_splitter.setSizes([450, 220])
+        self.cue_splitter.setHandleWidth(8)
 
         # 리스트 제어 버튼들
         self.btn_delete = QPushButton()
@@ -1990,6 +2234,66 @@ class PraiseSheetViewer(QMainWindow):
         # 스타일시트 수정: margin-top 제거, title 스타일 제거
         dual_group.setStyleSheet(
             """
+            /* Cue Sheet and Recommendation Card Splitter */
+            QSplitter#cueSplitter::handle:vertical {
+                height: 7px;
+                background-color: transparent;
+                image: none;
+            }
+            QSplitter#cueSplitter::handle:vertical:hover {
+                background-color: {highlight};
+                border-radius: 3px;
+            }
+            QWidget#recommendCard {
+                background-color: {card_bg};
+                border: 1px solid {border_col};
+                border-radius: 8px;
+            }
+            QLabel#recTitle {
+                color: {text_col};
+                font-weight: bold;
+            }
+            QPushButton#recAddBtn {
+                background-color: {button_bg};
+                color: {text_col};
+                border: 1px solid {border_col};
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 9pt;
+                font-weight: bold;
+                min-height: 24px;
+            }
+            QPushButton#recAddBtn:hover {
+                background-color: {highlight};
+                color: {highlight_text};
+                border: 1px solid {highlight};
+            }
+            QPushButton#recAddBtn:disabled {
+                background-color: transparent;
+                color: #A0AEC0;
+                border: 1px solid {border_col};
+            }
+            QListWidget#recListWidget {
+                background-color: transparent;
+                border: 1px solid {border_col};
+                border-radius: 5px;
+            }
+            QListWidget#recListWidget::item {
+                padding: 1px 4px;
+                min-height: 18px;
+                border-bottom: 1px solid transparent;
+                font-size: 9.5pt;
+            }
+            QListWidget#recListWidget::item:hover {
+                background-color: {item_hover_bg};
+                border-radius: 3px;
+            }
+            QListWidget#recListWidget::item:selected {
+                background-color: {highlight};
+                color: {highlight_text};
+                border-radius: 3px;
+            }
+
             QGroupBox {
                 border: 2px solid #555555;
                 border-radius: 8px;
@@ -2141,6 +2445,66 @@ class PraiseSheetViewer(QMainWindow):
         # 스타일시트로 상단 마진 제거하여 공간 확보
         shortcut_group_box.setStyleSheet(
             """
+            /* Cue Sheet and Recommendation Card Splitter */
+            QSplitter#cueSplitter::handle:vertical {
+                height: 7px;
+                background-color: transparent;
+                image: none;
+            }
+            QSplitter#cueSplitter::handle:vertical:hover {
+                background-color: {highlight};
+                border-radius: 3px;
+            }
+            QWidget#recommendCard {
+                background-color: {card_bg};
+                border: 1px solid {border_col};
+                border-radius: 8px;
+            }
+            QLabel#recTitle {
+                color: {text_col};
+                font-weight: bold;
+            }
+            QPushButton#recAddBtn {
+                background-color: {button_bg};
+                color: {text_col};
+                border: 1px solid {border_col};
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 9pt;
+                font-weight: bold;
+                min-height: 24px;
+            }
+            QPushButton#recAddBtn:hover {
+                background-color: {highlight};
+                color: {highlight_text};
+                border: 1px solid {highlight};
+            }
+            QPushButton#recAddBtn:disabled {
+                background-color: transparent;
+                color: #A0AEC0;
+                border: 1px solid {border_col};
+            }
+            QListWidget#recListWidget {
+                background-color: transparent;
+                border: 1px solid {border_col};
+                border-radius: 5px;
+            }
+            QListWidget#recListWidget::item {
+                padding: 1px 4px;
+                min-height: 18px;
+                border-bottom: 1px solid transparent;
+                font-size: 9.5pt;
+            }
+            QListWidget#recListWidget::item:hover {
+                background-color: {item_hover_bg};
+                border-radius: 3px;
+            }
+            QListWidget#recListWidget::item:selected {
+                background-color: {highlight};
+                color: {highlight_text};
+                border-radius: 3px;
+            }
+
             QGroupBox {
                 border: 1px solid #CCCCCC;
                 border-radius: 6px;
@@ -2183,7 +2547,7 @@ class PraiseSheetViewer(QMainWindow):
         top_layout.addLayout(sheet_controls_layout)
         top_layout.addWidget(self.tree)
         top_layout.addWidget(self.status_bar_label)
-        top_layout.addLayout(favorites_button_layout)
+        top_layout.addLayout(sheet_sync_tools_layout)
         top_layout.addWidget(self.btn_add_selected)
 
         # 2. 좌측 하단 패널 (플레이리스트 탐색)
@@ -2260,18 +2624,15 @@ class PraiseSheetViewer(QMainWindow):
         right_title.setObjectName("panelTitle")
 
         right_layout.addWidget(right_title)
-        right_layout.addWidget(self.list_widget, 1)
+        right_layout.addWidget(self.cue_splitter, 1)
         
         # [수정] 새로 만든 레이아웃 적용
         right_layout.addLayout(list_control_layout_1)
         right_layout.addLayout(list_control_layout_2)
         right_layout.addLayout(list_control_layout_3)
         
-        # right_layout.addLayout(list_control_grid) # 기존 코드 제거
-        # right_layout.addLayout(list_edit_layout)  # 기존 코드 제거
         right_layout.addWidget(dual_group)
         right_layout.addWidget(self.btn_open_settings)
-        right_layout.addWidget(shortcut_group_box)
 
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(20, 20, 20, 20)
@@ -2333,12 +2694,7 @@ class PraiseSheetViewer(QMainWindow):
                 # 1. 파일 삭제
                 os.remove(file_path)
 
-                # 2. 즐겨찾기 목록에서 제거
-                if file_path in self.favorites:
-                    self.favorites.remove(file_path)
-                    self.save_favorites()
-
-                # 3. 메타데이터 캐시 및 DB 제거
+                # 2. 메타데이터 캐시 및 DB 제거
                 norm_path = os.path.normpath(file_path)
                 if norm_path in self.metadata_cache:
                     del self.metadata_cache[norm_path]
@@ -2443,6 +2799,167 @@ class PraiseSheetViewer(QMainWindow):
                 self.list_widget.addItem(item)
                 self.list_widget.setCurrentRow(self.list_widget.count() - 1)
 
+    def toggle_selected_item_intermission(self):
+        items = self.list_widget.selectedItems()
+        if not items:
+            return
+        for item in items:
+            item_type = item.data(Qt.UserRole + 2)
+            if item_type == "text":
+                continue
+            path = item.data(Qt.UserRole)
+            if not path:
+                continue
+            is_intm = not bool(item.data(Qt.UserRole + 1))
+            item.setData(Qt.UserRole + 1, is_intm)
+            base_name = self.get_display_title(path)
+            if is_intm:
+                item.setText(f"☕ [Intermission] {base_name}")
+            else:
+                item.setText(f"🎼 {base_name}")
+
+    def clear_recommendations(self):
+        """추천 목록을 초기화합니다."""
+        self.rec_list_widget.clear()
+        self.rec_title_label.setText("💡 큐시트 곡 선택 시 연관 찬양 추천")
+        self.btn_add_rec_song.setEnabled(False)
+
+    def update_recommendations(self, song_path):
+        """선택된 곡을 기반으로 연관 찬양 목록을 갱신합니다."""
+        if not hasattr(self, "relation_engine") or not song_path:
+            self.clear_recommendations()
+            return
+
+        resolved_target = self.resolve_local_song_path(song_path)
+        target_title = self.get_display_title(resolved_target)
+        if not target_title:
+            target_title = os.path.splitext(os.path.basename(song_path))[0]
+
+        short_title = target_title if len(target_title) <= 16 else target_title[:15] + "…"
+        self.rec_title_label.setText(f"💡 [{short_title}] 연관 추천")
+        self.rec_title_label.setToolTip(f"선택 곡: {target_title}\n(함께 선곡되거나 다음 곡으로 이어진 찬양)")
+
+        current_cue_paths = []
+        for i in range(self.list_widget.count()):
+            p = self.list_widget.item(i).data(Qt.UserRole)
+            if p and os.path.isfile(p):
+                current_cue_paths.append(self.resolve_local_song_path(p))
+
+        related_songs = self.relation_engine.get_related_songs(
+            resolved_target, current_cue_paths=current_cue_paths, limit=20
+        )
+
+        self.rec_list_widget.clear()
+        self.btn_add_rec_song.setEnabled(False)
+
+        if not related_songs:
+            item = QListWidgetItem("이 찬양과 함께 불린 이력이 없습니다.")
+            item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+            item.setForeground(QColor(160, 160, 160))
+            self.rec_list_widget.addItem(item)
+            return
+
+        for item_data in related_songs:
+            rec_path = item_data["path"]
+            title = self.get_display_title(rec_path)
+            meta = self.metadata_cache.get(os.path.normpath(rec_path), ("", ""))
+            song_key = meta[0] if meta else ""
+            key_str = f" [{song_key}]" if song_key else ""
+
+            co_cnt = item_data["co_count"]
+            next_cnt = item_data["next_count"]
+            in_cue = item_data["in_cue"]
+
+            info_parts = [f"함께 {co_cnt}회"]
+            if next_cnt > 0:
+                info_parts.append(f"다음 {next_cnt}회")
+            if in_cue:
+                info_parts.append("담김")
+            info_str = ", ".join(info_parts)
+
+            status_icon = "✅" if in_cue else "🎼"
+
+            display_text = f"{status_icon} {title}{key_str} ({info_str})"
+            list_item = QListWidgetItem(display_text)
+            list_item.setData(Qt.UserRole, rec_path)
+            list_item.setData(Qt.UserRole + 1, in_cue)
+            if in_cue:
+                list_item.setForeground(QColor(140, 140, 140))
+            list_item.setToolTip(
+                f"곡명: {title}\nKey: {song_key or '미지정'}\n"
+                f"함께 선곡된 횟수: {co_cnt}회\n"
+                f"바로 다음 곡으로 선곡된 횟수: {next_cnt}회\n"
+                f"경로: {rec_path}\n"
+                f"(더블클릭 또는 [+] 버튼 시 큐시트에 추가)"
+            )
+            self.rec_list_widget.addItem(list_item)
+
+    def handle_rec_item_click(self, item):
+        """추천 찬양 클릭 시 악보 미리보기를 띄우고 추가 버튼을 활성화합니다."""
+        if not item:
+            self.btn_add_rec_song.setEnabled(False)
+            return
+        rec_path = item.data(Qt.UserRole)
+        if not rec_path or not os.path.isfile(rec_path):
+            self.btn_add_rec_song.setEnabled(False)
+            return
+        self.btn_add_rec_song.setEnabled(True)
+        self.current_preview_path = rec_path
+        self.update_preview_panel(rec_path)
+        self.load_metadata_to_inspector(rec_path)
+
+    def handle_rec_item_double_click(self, item):
+        """추천 찬양 더블클릭 시 큐시트에 바로 삽입합니다."""
+        if not item:
+            return
+        rec_path = item.data(Qt.UserRole)
+        if not rec_path or not os.path.isfile(rec_path):
+            return
+        self.add_selected_recommendation_to_cue_sheet()
+
+    def add_selected_recommendation_to_cue_sheet(self):
+        """추천 목록에서 선택된 찬양을 큐시트의 현재 선택 위치 다음(또는 맨 끝)에 추가합니다."""
+        current_item = self.rec_list_widget.currentItem()
+        if not current_item:
+            return
+        rec_path = current_item.data(Qt.UserRole)
+        if not rec_path or not os.path.isfile(rec_path):
+            return
+
+        base_name = self.get_display_title(rec_path)
+        new_item = QListWidgetItem(f"🎼 {base_name}")
+        new_item.setData(Qt.UserRole, rec_path)
+
+        current_row = self.list_widget.currentRow()
+        if 0 <= current_row < self.list_widget.count():
+            insert_row = current_row + 1
+            self.list_widget.insertItem(insert_row, new_item)
+            self.list_widget.setCurrentRow(insert_row)
+        else:
+            self.list_widget.addItem(new_item)
+            self.list_widget.setCurrentRow(self.list_widget.count() - 1)
+
+        self.update_recommendations(rec_path)
+
+    def show_rec_context_menu(self, pos):
+        """추천 찬양 우클릭 메뉴"""
+        item = self.rec_list_widget.itemAt(pos)
+        if not item:
+            return
+        rec_path = item.data(Qt.UserRole)
+        if not rec_path or not os.path.isfile(rec_path):
+            return
+        menu = QMenu(self)
+        action_add = QAction("큐시트에 추가", self)
+        action_add.triggered.connect(self.add_selected_recommendation_to_cue_sheet)
+        menu.addAction(action_add)
+
+        action_preview = QAction("악보 미리보기", self)
+        action_preview.triggered.connect(lambda: self.handle_rec_item_click(item))
+        menu.addAction(action_preview)
+
+        menu.exec(self.rec_list_widget.mapToGlobal(pos))
+
     def launch_capture_tool(self):
         exe_name = "sheetcapture.exe"
         exe_path = os.path.join(self.app_dir, exe_name)
@@ -2500,6 +3017,36 @@ class PraiseSheetViewer(QMainWindow):
 
         return super().eventFilter(obj, event)
 
+    def rebuild_filename_cache(self):
+        """악보 폴더(sheet_music_path) 내 모든 파일명(소문자) -> 실제 전체 절대경로 매핑 캐시를 생성합니다."""
+        self._filename_to_fullpath_cache = {}
+        if os.path.isdir(self.sheet_music_path):
+            for root, _dirs, files in os.walk(self.sheet_music_path):
+                for f in files:
+                    self._filename_to_fullpath_cache[f.lower()] = os.path.normpath(os.path.join(root, f))
+
+    def resolve_local_song_path(self, raw_path):
+        """어떤 경로(상대경로, 타 PC 절대경로, 로컬 절대경로 등)가 들어와도 현재 PC의 악보 폴더(sheet_music_path) 내 실제 파일 경로를 찾아 정규화하여 반환합니다."""
+        if not raw_path:
+            return ""
+        # 1. 이미 존재하는 로컬 절대경로
+        if os.path.isabs(raw_path) and os.path.isfile(raw_path):
+            return os.path.normpath(raw_path)
+
+        # 2. sheet_music_path와 결합한 경로가 존재하는 경우
+        cand = os.path.normpath(os.path.join(self.sheet_music_path, raw_path))
+        if os.path.isfile(cand):
+            return cand
+
+        # 3. 파일명(basename)으로 악보 폴더 내 파일 매핑 (타 PC 경로 매칭)
+        base_name_lower = os.path.basename(raw_path).lower()
+        if hasattr(self, "_filename_to_fullpath_cache"):
+            mapped = self._filename_to_fullpath_cache.get(base_name_lower)
+            if mapped and os.path.isfile(mapped):
+                return mapped
+
+        return cand
+
     def _to_rel_path(self, abs_path):
         """절대경로를 악보 폴더 기준 상대경로로 변환합니다."""
         if not abs_path:
@@ -2532,6 +3079,7 @@ class PraiseSheetViewer(QMainWindow):
                     file_path TEXT PRIMARY KEY,
                     song_key TEXT,
                     lyrics TEXT,
+                    display_title TEXT,
                     updated_at TEXT,
                     updated_by TEXT,
                     dirty INTEGER DEFAULT 0
@@ -2541,6 +3089,8 @@ class PraiseSheetViewer(QMainWindow):
             # 기존 DB에서 컬럼이 부족한 경우를 대비해 보강
             cur.execute("PRAGMA table_info(song_metadata)")
             cols = {row[1] for row in cur.fetchall()}
+            if "display_title" not in cols:
+                cur.execute("ALTER TABLE song_metadata ADD COLUMN display_title TEXT")
             if "updated_at" not in cols:
                 cur.execute("ALTER TABLE song_metadata ADD COLUMN updated_at TEXT")
             if "updated_by" not in cols:
@@ -2549,9 +3099,50 @@ class PraiseSheetViewer(QMainWindow):
                 cur.execute(
                     "ALTER TABLE song_metadata ADD COLUMN dirty INTEGER DEFAULT 0"
                 )
-            con.commit()
+
+            # 예전 버전에서 song_metadata.db 안에 함께 저장되던 song_titles 테이블이
+            # 남아있으면, 별도 파일(title_db_path)로 옮기고 여기서는 제거합니다.
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='song_titles'"
+            )
+            legacy_titles_exists = cur.fetchone() is not None
+            legacy_rows = []
+            if legacy_titles_exists:
+                cur.execute("PRAGMA table_info(song_titles)")
+                title_cols = {row[1] for row in cur.fetchall()}
+                if title_cols and "editor_name" not in title_cols:
+                    cur.execute("SELECT file_path, title, updated_at FROM song_titles")
+                    legacy_rows = cur.fetchall()
+                cur.execute("DROP TABLE song_titles")
+                con.commit()
 
             con.close()
+
+            # 이 PC 전용 제목 오버레이
+            title_con = sqlite3.connect(self.title_db_path)
+            title_cur = title_con.cursor()
+            title_cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS song_titles (
+                    file_path TEXT PRIMARY KEY,
+                    title TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            if legacy_rows:
+                title_cur.executemany(
+                    """
+                    INSERT INTO song_titles (file_path, title, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(file_path) DO UPDATE SET
+                        title=excluded.title,
+                        updated_at=excluded.updated_at
+                    """,
+                    legacy_rows,
+                )
+            title_con.commit()
+            title_con.close()
         except Exception as e:
             QMessageBox.critical(self, "DB 오류", f"데이터베이스 초기화 실패: {e}")
 
@@ -2568,7 +3159,6 @@ class PraiseSheetViewer(QMainWindow):
                 if os.path.isabs(norm) and norm.lower().startswith(base):
                     rel = os.path.relpath(norm, os.path.normpath(self.sheet_music_path))
                     if rel != fp:
-                        # 상대경로가 이미 존재하면 절대경로 항목만 삭제
                         cur.execute(
                             "SELECT 1 FROM song_metadata WHERE file_path = ?",
                             (rel,),
@@ -2608,29 +3198,34 @@ class PraiseSheetViewer(QMainWindow):
             print(f"DB 읽기 오류: {e}")
             return (None, None)
 
-    def set_metadata_in_db(self, file_path, song_key, lyrics):
+    def set_metadata_in_db(self, file_path, song_key, lyrics, display_title=None):
         try:
             rel = self._to_rel_path(file_path)
             con = sqlite3.connect(self.db_path)
             cur = con.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             editor = getattr(self, "editor_name", "") or ""
+            norm = os.path.normpath(file_path)
+            curr_meta = self.metadata_cache.get(norm, ("", "", ""))
+            final_title = display_title if display_title is not None else (curr_meta[2] if len(curr_meta) > 2 else "")
+
             cur.execute(
                 """
-                INSERT INTO song_metadata (file_path, song_key, lyrics, updated_at, updated_by, dirty)
-                VALUES (?, ?, ?, ?, ?, 1)
+                INSERT INTO song_metadata (file_path, song_key, lyrics, display_title, updated_at, updated_by, dirty)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(file_path) DO UPDATE SET
                     song_key=excluded.song_key,
                     lyrics=excluded.lyrics,
+                    display_title=excluded.display_title,
                     updated_at=excluded.updated_at,
                     updated_by=excluded.updated_by,
                     dirty=1
             """,
-                (rel, song_key, lyrics, now, editor),
+                (rel, song_key, lyrics, final_title, now, editor),
             )
             con.commit()
             con.close()
-            self.metadata_cache[os.path.normpath(file_path)] = (song_key, lyrics)
+            self.metadata_cache[norm] = (song_key, lyrics, final_title)
             self.proxy_model.invalidate()
         except Exception as e:
             QMessageBox.critical(self, "DB 오류", f"데이터베이스 저장 실패: {e}")
@@ -2657,14 +3252,144 @@ class PraiseSheetViewer(QMainWindow):
         try:
             con = sqlite3.connect(self.db_path)
             cur = con.cursor()
-            cur.execute("SELECT file_path, song_key, lyrics FROM song_metadata")
-            results = cur.fetchall()
-            con.close()
-            return {os.path.normpath(self._to_abs_path(row[0])): (row[1], row[2]) for row in results}
+            cur.execute("PRAGMA table_info(song_metadata)")
+            cols = {row[1] for row in cur.fetchall()}
+            if "display_title" in cols:
+                cur.execute("SELECT file_path, song_key, lyrics, display_title FROM song_metadata")
+                results = cur.fetchall()
+                con.close()
+                return {os.path.normpath(self._to_abs_path(row[0])): (row[1] or "", row[2] or "", row[3] or "") for row in results}
+            else:
+                cur.execute("SELECT file_path, song_key, lyrics FROM song_metadata")
+                results = cur.fetchall()
+                con.close()
+                return {os.path.normpath(self._to_abs_path(row[0])): (row[1] or "", row[2] or "", "") for row in results}
         except Exception as e:
             QMessageBox.critical(self, "DB 오류", f"전체 메타데이터 로드 실패: {e}")
             return {}
 
+    def get_title_from_db(self, file_path):
+        """이 PC 전용 제목 오버레이를 읽어옵니다. Drive에는 절대 올라가지 않는 로컬 전용 값."""
+        try:
+            rel = self._to_rel_path(file_path).lower()
+            con = sqlite3.connect(self.title_db_path)
+            cur = con.cursor()
+            cur.execute(
+                "SELECT title FROM song_titles WHERE LOWER(file_path) = ?",
+                (rel,),
+            )
+            result = cur.fetchone()
+            con.close()
+            return result[0] if result else None
+        except Exception as e:
+            print(f"제목 DB 읽기 오류: {e}")
+            return None
+
+    def set_title_in_db(self, file_path, title):
+        """실제 파일명/Drive는 건드리지 않고, 이 PC에만 저장되는 표시 제목을 기록합니다."""
+        try:
+            rel = self._to_rel_path(file_path)
+            con = sqlite3.connect(self.title_db_path)
+            cur = con.cursor()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                """
+                INSERT INTO song_titles (file_path, title, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    title=excluded.title,
+                    updated_at=excluded.updated_at
+                """,
+                (rel, title, now),
+            )
+            con.commit()
+            con.close()
+            self.title_cache[os.path.normpath(file_path)] = title
+
+            # 중앙 메타데이터(song_metadata.db)에도 display_title 연동 및 dirty=1 마킹
+            try:
+                con_meta = sqlite3.connect(self.db_path)
+                cur_meta = con_meta.cursor()
+                editor = getattr(self, "editor_name", "") or ""
+                cur_meta.execute(
+                    """
+                    INSERT INTO song_metadata (file_path, song_key, lyrics, display_title, updated_at, updated_by, dirty)
+                    VALUES (?, '', '', ?, ?, ?, 1)
+                    ON CONFLICT(file_path) DO UPDATE SET
+                        display_title=excluded.display_title,
+                        updated_at=excluded.updated_at,
+                        updated_by=excluded.updated_by,
+                        dirty=1
+                    """,
+                    (rel, title, now, editor),
+                )
+                con_meta.commit()
+                con_meta.close()
+                curr_meta = self.metadata_cache.get(os.path.normpath(file_path), ("", "", ""))
+                self.metadata_cache[os.path.normpath(file_path)] = (curr_meta[0], curr_meta[1], title)
+            except Exception as e_meta:
+                print(f"메타데이터 DB 제목 연동 실패 (무시): {e_meta}")
+
+            self.proxy_model.invalidate()
+        except Exception as e:
+            QMessageBox.critical(self, "DB 오류", f"제목 저장 실패: {e}")
+
+    def clear_title_in_db(self, file_path):
+        """제목 오버레이를 지우고 원래 파일명 표시로 되돌립니다."""
+        try:
+            rel = self._to_rel_path(file_path)
+            con = sqlite3.connect(self.title_db_path)
+            cur = con.cursor()
+            cur.execute(
+                "DELETE FROM song_titles WHERE file_path = ?",
+                (rel,),
+            )
+            con.commit()
+            con.close()
+            self.title_cache.pop(os.path.normpath(file_path), None)
+            self.proxy_model.invalidate()
+        except Exception as e:
+            QMessageBox.critical(self, "DB 오류", f"제목 초기화 실패: {e}")
+
+    def load_all_titles_from_db(self):
+        """이 PC에 저장된 제목 오버레이를 전부 캐시로 불러옵니다 (로컬 전용, Drive 미동기화)."""
+        try:
+            con = sqlite3.connect(self.title_db_path)
+            cur = con.cursor()
+            cur.execute(
+                "SELECT file_path, title FROM song_titles WHERE title IS NOT NULL AND title != ''"
+            )
+            results = cur.fetchall()
+            con.close()
+            return {
+                os.path.normpath(self._to_abs_path(row[0])): row[1] for row in results
+            }
+        except Exception as e:
+            print(f"제목 캐시 로드 오류: {e}")
+            return {}
+
+    def get_display_title(self, path):
+        """트리/플레이리스트/전체화면 등 어디서든 곡 이름을 표시할 때 쓰는 공용 헬퍼.
+        1순위: 개인 로컬 오버레이 (song_titles.db)
+        2순위: 중앙 메타데이터 공용 표준 제목 (song_metadata.db / Google Sheets)
+        3순위: 원본 파일명 (확장자 제외)"""
+        if not path:
+            return ""
+        real_path = self.resolve_local_song_path(path)
+        norm = os.path.normpath(real_path)
+
+        # 1순위: 개인 로컬 오버레이
+        local_title = self.title_cache.get(norm)
+        if local_title:
+            return local_title
+
+        # 2순위: 중앙 메타데이터 공용 표준 제목
+        meta = self.metadata_cache.get(norm)
+        if meta and len(meta) > 2 and meta[2]:
+            return meta[2]
+
+        # 3순위: 원본 파일명
+        return os.path.splitext(os.path.basename(real_path or path))[0]
     def load_metadata_to_inspector(self, path):
         if (
             path is None
@@ -2862,8 +3587,7 @@ class PraiseSheetViewer(QMainWindow):
             if is_intermission:
                 display_text = f"☕ [Intermission] {base_name}"
             else:
-                item_text = f"⭐ {base_name}" if path in self.favorites else base_name
-                display_text = f"🎼 {item_text}"
+                display_text = f"🎼 {base_name}"
 
             new_item = QListWidgetItem(display_text)
             new_item.setData(Qt.UserRole, path)
@@ -3180,6 +3904,66 @@ class PraiseSheetViewer(QMainWindow):
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
 
+            /* Cue Sheet and Recommendation Card Splitter */
+            QSplitter#cueSplitter::handle:vertical {{
+                height: 7px;
+                background-color: transparent;
+                image: none;
+            }}
+            QSplitter#cueSplitter::handle:vertical:hover {{
+                background-color: {highlight};
+                border-radius: 3px;
+            }}
+            QWidget#recommendCard {{
+                background-color: {card_bg};
+                border: 1px solid {border_col};
+                border-radius: 8px;
+            }}
+            QLabel#recTitle {{
+                color: {text_col};
+                font-weight: bold;
+            }}
+            QPushButton#recAddBtn {{
+                background-color: {button_bg};
+                color: {text_col};
+                border: 1px solid {border_col};
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 9pt;
+                font-weight: bold;
+                min-height: 24px;
+            }}
+            QPushButton#recAddBtn:hover {{
+                background-color: {highlight};
+                color: {highlight_text};
+                border: 1px solid {highlight};
+            }}
+            QPushButton#recAddBtn:disabled {{
+                background-color: transparent;
+                color: #A0AEC0;
+                border: 1px solid {border_col};
+            }}
+            QListWidget#recListWidget {{
+                background-color: transparent;
+                border: 1px solid {border_col};
+                border-radius: 5px;
+            }}
+            QListWidget#recListWidget::item {{
+                padding: 1px 4px;
+                min-height: 18px;
+                border-bottom: 1px solid transparent;
+                font-size: 9.5pt;
+            }}
+            QListWidget#recListWidget::item:hover {{
+                background-color: {main_bg};
+                border-radius: 3px;
+            }}
+            QListWidget#recListWidget::item:selected {{
+                background-color: {highlight};
+                color: {highlight_text};
+                border-radius: 3px;
+            }}
+
             QGroupBox {{
                 background-color: {card_bg};
                 border: 1px solid {border_col};
@@ -3463,16 +4247,6 @@ class PraiseSheetViewer(QMainWindow):
             self.save_settings()
 
     def on_search_text_changed(self, text):
-        if self.favorites_view_active:
-            self.search_input.blockSignals(True)
-            self.search_input.clear()
-            self.search_input.blockSignals(False)
-            QMessageBox.information(
-                self,
-                "알림",
-                "즐겨찾기 보기 모드에서는 검색할 수 없습니다.\n'전체 보기'로 전환 후 검색해주세요.",
-            )
-            return
         self.search_timer.start()
 
     def perform_search_filter(self):
@@ -3657,18 +4431,7 @@ class PraiseSheetViewer(QMainWindow):
             action_add_to_list.triggered.connect(self.add_selected_file_single)
             menu.addAction(action_add_to_list)
             menu.addSeparator()
-            if path in self.favorites:
-                action_remove_favorite = QAction("즐겨찾기에서 삭제", self)
-                action_remove_favorite.triggered.connect(
-                    self.remove_current_from_favorites
-                )
-                menu.addAction(action_remove_favorite)
-            else:
-                action_add_favorite = QAction("즐겨찾기에 추가", self)
-                action_add_favorite.triggered.connect(self.add_current_to_favorites)
-                menu.addAction(action_add_favorite)
-            menu.addSeparator()
-            action_rename = QAction("이름 바꾸기", self)
+            action_rename = QAction("제목 바꾸기 (내 PC 표시용, 원본 파일명 유지)", self)
             action_rename.triggered.connect(lambda: self.tree.edit(index))
             menu.addAction(action_rename)
 
@@ -3728,68 +4491,20 @@ class PraiseSheetViewer(QMainWindow):
                     f"파일을 삭제하는 중 오류가 발생했습니다: {e}",
                 )
 
-    def load_favorites(self):
-        try:
-            if os.path.exists(self.favorites_file):
-                with open(self.favorites_file, "r", encoding="utf-8") as f:
-                    self.favorites = set(json.load(f))
-        except (json.JSONDecodeError, TypeError):
-            self.favorites = set()
-            QMessageBox.warning(
-                self, "즐겨찾기 로드 오류", "즐겨찾기 파일을 불러오는 데 실패했습니다."
-            )
-
-    def save_favorites(self):
-        try:
-            with open(self.favorites_file, "w", encoding="utf-8") as f:
-                json.dump(list(self.favorites), f, indent=4)
-        except Exception as e:
-            QMessageBox.critical(
-                self, "즐겨찾기 저장 오류", f"즐겨찾기를 저장하는 중 오류 발생: {e}"
-            )
-
-    def add_current_to_favorites(self):
-        index = self.tree.currentIndex()
-        if not index.isValid():
+    def show_list_widget_context_menu(self, pos):
+        item = self.list_widget.itemAt(pos)
+        if not item:
             return
-        source_index = self.proxy_model.mapToSource(index)
-        path = self.model.filePath(source_index)
-        if os.path.isfile(path):
-            self.favorites.add(path)
-            self.save_favorites()
-            self.proxy_model.invalidate()
-        else:
-            QMessageBox.warning(self, "알림", "폴더는 즐겨찾기에 추가할 수 없습니다.")
+        menu = QMenu(self)
+        action_intermission = QAction("인터미션 토글", self)
+        action_intermission.triggered.connect(self.toggle_selected_item_intermission)
+        menu.addAction(action_intermission)
 
-    def remove_current_from_favorites(self):
-        index = self.tree.currentIndex()
-        if not index.isValid():
-            return
-        source_index = self.proxy_model.mapToSource(index)
-        path = self.model.filePath(source_index)
-        if os.path.isfile(path):
-            self.favorites.discard(path)
-            self.save_favorites()
-            self.proxy_model.invalidate()
-        else:
-            QMessageBox.warning(self, "알림", "폴더는 즐겨찾기에서 제거할 수 없습니다.")
+        action_delete = QAction("선택 항목 삭제", self)
+        action_delete.triggered.connect(self.delete_selected_items)
+        menu.addAction(action_delete)
 
-    def toggle_favorites_view(self, checked):
-        self.favorites_view_active = checked
-        if checked:
-            self.btn_toggle_favorites_view.setText("전체 보기")
-            self.search_input.setEnabled(False)
-            self.btn_reset_search.setEnabled(False)
-        else:
-            self.btn_toggle_favorites_view.setText("즐겨찾기 보기")
-            self.search_input.setEnabled(True)
-            self.btn_reset_search.setEnabled(True)
-        self.proxy_model.set_favorites_only_mode(checked)
-        self.tree.setRootIndex(
-            self.proxy_model.mapFromSource(self.model.index(self.model.rootPath()))
-        )
-        self.tree.expandAll()
-        self.update_file_count(self.sheet_music_path)
+        menu.exec(self.list_widget.mapToGlobal(pos))
 
     def _add_paths_from_pls(self, pls_path):
         try:
@@ -3827,20 +4542,15 @@ class PraiseSheetViewer(QMainWindow):
                     path = entry.get("path")
                     is_intermission = entry.get("is_intermission", False)
 
-                full_path = os.path.normpath(os.path.join(self.sheet_music_path, path))
+                full_path = self.resolve_local_song_path(path)
 
                 if os.path.exists(full_path) and os.path.isfile(full_path):
-                    base_name = os.path.splitext(os.path.basename(full_path))[0]
+                    base_name = self.get_display_title(full_path)
 
                     if is_intermission:
                         display_text = f"☕ [Intermission] {base_name}"
                     else:
-                        item_text = (
-                            f"⭐ {base_name}"
-                            if full_path in self.favorites
-                            else base_name
-                        )
-                        display_text = f"🎼 {item_text}"
+                        display_text = f"🎼 {base_name}"
 
                     item = QListWidgetItem(display_text)
                     item.setData(Qt.UserRole, full_path)
@@ -3857,6 +4567,19 @@ class PraiseSheetViewer(QMainWindow):
                 self, "오류", f".pls 파일을 불러오는 중 오류 발생: {e}"
             )
 
+    def add_song_path_to_cue_sheet(self, path):
+        """단일 악보 파일 경로를 현재 큐시트 끝에 추가한다."""
+        resolved = self.resolve_local_song_path(path)
+        if not resolved or not os.path.isfile(resolved):
+            QMessageBox.warning(
+                self, "추가 실패", f"파일을 찾을 수 없습니다:\n{path}"
+            )
+            return
+        base_name = self.get_display_title(resolved)
+        item = QListWidgetItem(f"🎼 {base_name}")
+        item.setData(Qt.UserRole, resolved)
+        self.list_widget.addItem(item)
+
     def add_selected_file_single(self):
         idx = self.tree.currentIndex()
         if not idx.isValid() or idx.column() != 0:
@@ -3867,11 +4590,7 @@ class PraiseSheetViewer(QMainWindow):
             if path.lower().endswith(".pls"):
                 self._add_paths_from_pls(path)
             elif path.lower().endswith(tuple(self.image_extensions)):
-                base_name = os.path.splitext(os.path.basename(path))[0]
-                item_text = f"⭐ {base_name}" if path in self.favorites else base_name
-                item = QListWidgetItem(f"🎼 {item_text}")
-                item.setData(Qt.UserRole, path)
-                self.list_widget.addItem(item)
+                self.add_song_path_to_cue_sheet(path)
         elif os.path.isdir(path):
             QMessageBox.information(
                 self, "정보", "폴더는 추가할 수 없습니다. 파일을 선택해 주세요."
@@ -3891,11 +4610,7 @@ class PraiseSheetViewer(QMainWindow):
             if path.lower().endswith(".pls"):
                 self._add_paths_from_pls(path)
             elif path.lower().endswith(tuple(self.image_extensions)):
-                base_name = os.path.splitext(os.path.basename(path))[0]
-                item_text = f"⭐ {base_name}" if path in self.favorites else base_name
-                item = QListWidgetItem(f"🎼 {item_text}")
-                item.setData(Qt.UserRole, path)
-                self.list_widget.addItem(item)
+                self.add_song_path_to_cue_sheet(path)
         elif os.path.isdir(path):
             tree.setExpanded(index, not tree.isExpanded(index))
 
@@ -3903,105 +4618,24 @@ class PraiseSheetViewer(QMainWindow):
         self.list_widget.takeItem(self.list_widget.row(item))
 
     def handle_list_click(self, item):
-        pass
-
-    # --- [추가] 찬양 리스트 아이템 표시 갱신/인터미션 토글 ---
-    def _update_list_item_display(self, item: QListWidgetItem):
-        """리스트 아이템의 텍스트를 현재 상태(인터미션 여부/즐겨찾기) 기준으로 갱신합니다."""
-        path = item.data(Qt.UserRole)
-        if not path:
-            return
-        base_name = os.path.splitext(os.path.basename(path))[0]
-        is_intermission = bool(item.data(Qt.UserRole + 1))
-
-        if is_intermission:
-            item.setText(f"☕ [Intermission] {base_name}")
-        else:
-            item_text = f"⭐ {base_name}" if path in self.favorites else base_name
-            item.setText(f"🎼 {item_text}")
-
-    def toggle_selected_item_intermission(self):
-        """현재 선택된 1개의 리스트 항목을 인터미션/악보로 전환합니다."""
-        selected = self.list_widget.selectedItems()
-        if len(selected) != 1:
-            return
-        item = selected[0]
-        path = item.data(Qt.UserRole)
-
-        if not (
-            path
-            and os.path.isfile(path)
-            and path.lower().endswith(tuple(self.image_extensions))
-        ):
-            QMessageBox.information(
-                self, "알림", "이미지 항목만 인터미션으로 전환할 수 있습니다."
-            )
-            return
-
-        is_intm = bool(item.data(Qt.UserRole + 1))
-        item.setData(Qt.UserRole + 1, (not is_intm))
-        self._update_list_item_display(item)
-
-    def show_list_widget_context_menu(self, pos):
-        item = self.list_widget.itemAt(pos)
         if not item:
+            self.clear_recommendations()
             return
-        menu = QMenu()
-        action_start_show_current = QAction("현재 곡부터 쇼 시작", self)
-        action_start_show_current.triggered.connect(self.start_show_from_current)
-        menu.addAction(action_start_show_current)
+        path = item.data(Qt.UserRole)
+        item_type = item.data(Qt.UserRole + 2)
 
-        # [추가] 우클릭으로 인터미션 전환/해제
-        selected = self.list_widget.selectedItems()
-        if len(selected) == 1:
-            sel_item = selected[0]
-            path = sel_item.data(Qt.UserRole)
-            is_image = (
-                path
-                and os.path.isfile(path)
-                and path.lower().endswith(tuple(self.image_extensions))
-            )
-            if is_image:
-                menu.addSeparator()
-                is_intm = bool(sel_item.data(Qt.UserRole + 1))
-                toggle_text = (
-                    "인터미션 이미지로 변경" if not is_intm else "인터미션 해제(악보로)"
-                )
-                action_toggle_intm = QAction(toggle_text, self)
-                action_toggle_intm.triggered.connect(
-                    self.toggle_selected_item_intermission
-                )
-                menu.addAction(action_toggle_intm)
-
-            # [추가] 텍스트 아이템 수정 메뉴
-            item_type = sel_item.data(Qt.UserRole + 2)
-            if item_type == "text":
-                menu.addSeparator()
-                action_edit_text = QAction("텍스트 수정", self)
-                action_edit_text.triggered.connect(lambda: self.edit_text_slide(sel_item))
-                menu.addAction(action_edit_text)
-        menu.addSeparator()
-        action_delete = QAction("삭제", self)
-        action_delete.triggered.connect(self.delete_selected_items)
-        menu.addAction(action_delete)
-
-        if len(self.list_widget.selectedItems()) == 1:
-            menu.addSeparator()
-            action_move_top = QAction("맨 위로 이동", self)
-            action_move_top.triggered.connect(self.move_item_top)
-            menu.addAction(action_move_top)
-            action_move_up = QAction("위로 이동", self)
-            action_move_up.triggered.connect(self.move_item_up)
-            menu.addAction(action_move_up)
-            action_move_down = QAction("아래로 이동", self)
-            action_move_down.triggered.connect(self.move_item_down)
-            menu.addAction(action_move_down)
-            action_move_bottom = QAction("맨 아래로 이동", self)
-            action_move_bottom.triggered.connect(self.move_item_bottom)
-            menu.addAction(action_move_bottom)
-
-        menu.exec(self.list_widget.mapToGlobal(pos))
-
+        if item_type == "text":
+            self.current_preview_path = None
+            self.current_preview_text_data = item.data(Qt.UserRole + 3)
+            self.update_preview_panel(None)
+            self.load_metadata_to_inspector(None)
+            self.clear_recommendations()
+        else:
+            self.current_preview_text_data = None
+            self.current_preview_path = path
+            self.update_preview_panel(path)
+            self.load_metadata_to_inspector(path)
+            self.update_recommendations(path)
     def delete_selected_items(self):
         for item in self.list_widget.selectedItems():
             self.list_widget.takeItem(self.list_widget.row(item))
@@ -5550,10 +6184,11 @@ class BarChartWidget(QWidget):
 class PlaylistSongStatsDialog(QDialog):
     """곡 기준 플레이 리스트 통계: 요약 카드, 테이블/그래프 탭, 곡 선택 시 포함 리스트 목록."""
 
-    def __init__(self, playlist_path, sheet_music_path, parent=None):
+    def __init__(self, playlist_path, sheet_music_path, parent=None, title_cache=None):
         super().__init__(parent)
         self.playlist_path = playlist_path
         self.sheet_music_path = sheet_music_path
+        self.title_cache = title_cache or {}
         self.song_to_playlists = {}  # full_path -> set of playlist names
         self.broken_count = 0
         self.include_subfolders = True
@@ -5698,7 +6333,7 @@ class PlaylistSongStatsDialog(QDialog):
         by_count = self.sort_combo.currentIndex() == 0
         rows = []
         for full_path, plists in self.song_to_playlists.items():
-            name = os.path.splitext(os.path.basename(full_path))[0]
+            name = self.title_cache.get(os.path.normpath(full_path)) or os.path.splitext(os.path.basename(full_path))[0]
             count = len(plists)
             rows.append((name, count, full_path, plists))
         if by_count:

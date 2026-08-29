@@ -194,7 +194,11 @@ class ConfirmDialog(QDialog):
         form_layout.addWidget(self.name_edit)
         form_layout.addWidget(QLabel(".jpg"))
         layout.addLayout(form_layout)
-        
+
+        naming_hint = QLabel("권장 규칙: 가사 시작 부분 + 키 + 원제목(있으면)  예) 매일 스치는 사람들 C 주가필요해")
+        naming_hint.setStyleSheet("color: #888; font-size: 9pt; margin-bottom: 5px;")
+        layout.addWidget(naming_hint)
+
         self.chk_upload = QCheckBox("☁️ 구글 드라이브에 자동 업로드")
         self.chk_upload.setChecked(True)
         self.chk_upload.setStyleSheet("font-weight: bold; color: #0078D7;")

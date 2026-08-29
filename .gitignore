@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 
+# Tooling state
+.omc/
+
 # Virtual environment
 .venv/
 
@@ -13,6 +16,7 @@ dist/
 # Local data / logs
 favorites.json
 song_metadata.db
+song_titles.db
 layout_editor.log
 
 # Secrets / local settings (절대 GitHub에 올리면 안 됨)
