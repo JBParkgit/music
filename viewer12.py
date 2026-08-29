@@ -353,8 +353,9 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
                 old_norm = os.path.normpath(old_path)
                 new_norm = os.path.normpath(new_path)
                 if old_norm in self.metadata_cache:
-                    key, lyrics = self.metadata_cache.pop(old_norm)
-                    self.metadata_cache[new_norm] = (key, lyrics)
+                    meta = self.metadata_cache.pop(old_norm)
+                    key, lyrics = meta[0], meta[1]
+                    self.metadata_cache[new_norm] = meta
                     if self.parent():
                         parent_window = self.parent()
                         parent_window.set_metadata_in_db(new_path, key, lyrics)
@@ -1195,6 +1196,24 @@ class MetadataUploadThread(QThread):
 
 # --- [추가] 텍스트 슬라이드 입력 다이얼로그 ---
 
+def text_slide_theme_style(theme_name):
+    """텍스트 슬라이드 테마 이름 -> {'bg': <CSS>, 'color': <hex>} (미리보기/다이얼로그 공용)."""
+    theme_name = theme_name or ""
+    if "새벽" in theme_name:
+        return {
+            "bg": "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0f2027, stop:1 #203a43);",
+            "color": "#ffffff",
+        }
+    if "말씀" in theme_name:
+        return {"bg": "background-color: #f5f5f0;", "color": "#333333"}
+    if "은혜" in theme_name:
+        return {
+            "bg": "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #23074d, stop:1 #cc5333);",
+            "color": "#333333",
+        }
+    return {"bg": "background-color: #000000;", "color": "#ffffff"}
+
+
 class TextSlideDialog(QDialog):
     def __init__(self, parent=None, initial_data=None):
         super().__init__(parent)
@@ -1442,30 +1461,8 @@ class TextSlideDialog(QDialog):
         self.preview_frame.layout().setContentsMargins(0, margin_val, 0, margin_val)
 
     def get_theme_style(self, theme_name):
-        # 테마별 CSS 정의 (배경 및 글자색)
-        if "새벽" in theme_name:
-            # Midnight Blue Gradient
-            return {
-                "bg": "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0f2027, stop:1 #203a43);",
-                "color": "#ffffff"
-            }
-        elif "말씀" in theme_name:
-            # Warm Paper / Brown Gradient
-            return {
-                "bg": "background-color: #f5f5f0;", # Matte paper color
-                "color": "#333333" 
-            }
-        elif "은혜" in theme_name:
-            # Soft Purple Gradient
-            return {
-                "bg": "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #23074d, stop:1 #cc5333);",
-                "color": "#333333"
-            }
-        else: # 기본 (Deep Black)
-            return {
-                "bg": "background-color: #000000;",
-                "color": "#ffffff"
-            }
+        # 테마별 CSS 정의 (배경 및 글자색) — 미리보기 패널과 공용
+        return text_slide_theme_style(theme_name)
 
 # --- [연관 찬양 추천 엔진] ---
 class PlaylistRelationEngine:
@@ -1623,7 +1620,13 @@ class PraiseSheetViewer(QMainWindow):
     # --- [__init__ 메서드 수정: 초기 크기 지정] ---
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("물댄동산 악보 뷰어 Pet1 2:9 V5.4")
+        self.base_window_title = "물댄동산 악보 뷰어 Pet1 2:9 V5.5"
+        self.setWindowTitle(self.base_window_title)
+
+        # 큐시트(플레이리스트) 편집 상태: 현재 열려있는 .pls 경로와 수정 여부
+        self.current_playlist_path = None
+        self.playlist_dirty = False
+        self._suppress_dirty = False
 
         # 초기 크기를 넉넉히 잡아 윈도우 매니저가 배치할 때 깜빡임 최소화
         self.resize(1600, 900)
@@ -1913,9 +1916,9 @@ class PraiseSheetViewer(QMainWindow):
         # 메타데이터 접기/펼치기 헤더
         header_layout = QHBoxLayout()
         self.btn_toggle_metadata = QToolButton()
-        self.btn_toggle_metadata.setText("조와 가사 ▼")
+        self.btn_toggle_metadata.setText("조와 가사 ▶")
         self.btn_toggle_metadata.setCheckable(True)
-        self.btn_toggle_metadata.setChecked(True)
+        self.btn_toggle_metadata.setChecked(False)
         self.btn_toggle_metadata.clicked.connect(self.toggle_metadata_panel)
         header_layout.addWidget(self.btn_toggle_metadata)
         header_layout.addStretch()
@@ -1992,9 +1995,9 @@ class PraiseSheetViewer(QMainWindow):
         inspector_main_layout.addLayout(db_buttons_layout)
 
         # 기본 상태: 조와 가사(메타데이터) 영역을 접은 상태로 시작
-        self.metadata_container.show()
-        self.btn_toggle_metadata.setText("조와 가사 ▼")
-        self.btn_toggle_metadata.setChecked(True)
+        self.metadata_container.hide()
+        self.btn_toggle_metadata.setText("조와 가사 ▶")
+        self.btn_toggle_metadata.setChecked(False)
 
         self.inspector_key_combo.currentTextChanged.connect(
             self.on_inspector_key_changed
@@ -2039,6 +2042,16 @@ class PraiseSheetViewer(QMainWindow):
         )
         self.list_widget.setMouseTracking(True)
         self.list_widget.mouseMoveEvent = self.list_widget_mouse_move_event
+        # 큐시트 곡 수를 제목에 표시 (항목 추가/삭제/초기화 시 자동 갱신)
+        _cue_model = self.list_widget.model()
+        _cue_model.rowsInserted.connect(self.update_cue_count)
+        _cue_model.rowsRemoved.connect(self.update_cue_count)
+        _cue_model.modelReset.connect(self.update_cue_count)
+        # 큐시트 내용이 바뀌면 "수정됨" 표시 (불러오기 중에는 _suppress_dirty로 무시)
+        _cue_model.rowsInserted.connect(self._on_cue_sheet_changed)
+        _cue_model.rowsRemoved.connect(self._on_cue_sheet_changed)
+        _cue_model.rowsMoved.connect(self._on_cue_sheet_changed)
+        _cue_model.dataChanged.connect(self._on_cue_sheet_changed)
 
         # --- [연관 찬양 추천 서브 카드 UI] ---
         self.recommend_container = QWidget()
@@ -2119,17 +2132,39 @@ class PraiseSheetViewer(QMainWindow):
         self.btn_move_top.clicked.connect(self.move_item_top)
         self.btn_move_bottom.clicked.connect(self.move_item_bottom)
 
+        self.btn_new_list = QPushButton()
+        self.set_icon_button(
+            self.btn_new_list, QStyle.SP_FileIcon, "새 큐시트 (현재 내용 비우기) — Ctrl+N", "새로"
+        )
+        self.btn_new_list.clicked.connect(self.new_cue_sheet)
+        self.btn_new_list.setShortcut("Ctrl+N")
+
         self.btn_save_list = QPushButton()
         self.set_icon_button(
-            self.btn_save_list, QStyle.SP_DialogSaveButton, "리스트 저장", "저장"
+            self.btn_save_list,
+            QStyle.SP_DialogSaveButton,
+            "저장 (열어둔 리스트에 덮어쓰기, 새 리스트는 이름 입력)",
+            "저장",
         )
         self.btn_save_list.clicked.connect(self.save_list)
+        self.btn_save_list.setShortcut("Ctrl+S")
+
+        self.btn_save_list_as = QPushButton()
+        self.set_icon_button(
+            self.btn_save_list_as,
+            QStyle.SP_DialogSaveButton,
+            "다른 이름으로 저장 — Ctrl+Shift+S",
+            "새이름",
+        )
+        self.btn_save_list_as.clicked.connect(self.save_list_as)
+        self.btn_save_list_as.setShortcut("Ctrl+Shift+S")
 
         self.btn_load_list = QPushButton()
         self.set_icon_button(
-            self.btn_load_list, QStyle.SP_DialogOpenButton, "리스트 불러오기", "열기"
+            self.btn_load_list, QStyle.SP_DialogOpenButton, "리스트 불러오기 (현재 내용 대체) — Ctrl+O", "열기"
         )
         self.btn_load_list.clicked.connect(self.load_list)
+        self.btn_load_list.setShortcut("Ctrl+O")
 
         # [레이아웃 수정] 버튼들을 보기 좋게 배치
         list_control_layout_1 = QHBoxLayout()
@@ -2145,8 +2180,10 @@ class PraiseSheetViewer(QMainWindow):
         list_control_layout_2.addWidget(self.btn_move_bottom)
         
         list_control_layout_3 = QHBoxLayout()
-        list_control_layout_3.addWidget(self.btn_save_list)
+        list_control_layout_3.addWidget(self.btn_new_list)
         list_control_layout_3.addWidget(self.btn_load_list)
+        list_control_layout_3.addWidget(self.btn_save_list)
+        list_control_layout_3.addWidget(self.btn_save_list_as)
 
         # [Clean up] Unused layout block removed to avoid reparenting issues
 
@@ -2609,7 +2646,7 @@ class PraiseSheetViewer(QMainWindow):
         self.center_splitter = QSplitter(Qt.Vertical)
         self.center_splitter.addWidget(preview_widget)
         self.center_splitter.addWidget(inspector_group_box)
-        # 기본값: 메타데이터 패널이 접힌 상태를 기준으로 넓게 설정
+        # 기본값: 조와 가사(메타데이터) 영역을 접은 상태 기준으로 미리보기를 넓게
         self.center_splitter.setSizes([850, 80])
         self.center_splitter.setHandleWidth(10)
 
@@ -2620,10 +2657,10 @@ class PraiseSheetViewer(QMainWindow):
         right_layout.setContentsMargins(15, 15, 15, 15)
         right_layout.setSpacing(10)
 
-        right_title = QLabel("큐시트(순서)")
-        right_title.setObjectName("panelTitle")
+        self.right_title = QLabel("큐시트(순서)")
+        self.right_title.setObjectName("panelTitle")
 
-        right_layout.addWidget(right_title)
+        right_layout.addWidget(self.right_title)
         right_layout.addWidget(self.cue_splitter, 1)
         
         # [수정] 새로 만든 레이아웃 적용
@@ -2657,6 +2694,15 @@ class PraiseSheetViewer(QMainWindow):
                 current, self.playlist_tree
             )
         )
+        # 이미 선택된 행을 다시 클릭해도(그 사이 큐시트 곡을 미리봤더라도) 미리보기가
+        # 즉시 그 리스트로 갱신되도록 clicked도 연결한다. currentChanged는 인덱스가
+        # 실제로 바뀔 때만 발생하기 때문.
+        self.tree.clicked.connect(
+            lambda index: self.preview_selected_file(index, self.tree)
+        )
+        self.playlist_tree.clicked.connect(
+            lambda index: self.preview_selected_file(index, self.playlist_tree)
+        )
 
         self.model.directoryLoaded.connect(self.update_file_count)
         self.update_file_count(self.sheet_music_path)
@@ -2664,6 +2710,24 @@ class PraiseSheetViewer(QMainWindow):
 
         self.apply_theme(self.current_theme)
         self.warm_up_list_widget()
+        self.update_cue_count()
+        self.update_playlist_window_title()
+
+    def current_playlist_display_name(self):
+        """현재 편집 중인 큐시트 이름(파일명, 없으면 '새 큐시트')을 돌려줍니다."""
+        if getattr(self, "current_playlist_path", None):
+            return os.path.splitext(os.path.basename(self.current_playlist_path))[0]
+        return "새 큐시트"
+
+    def update_cue_count(self, *args):
+        """큐시트 제목 라벨에 편집 중인 리스트 이름 / 수정 여부(●) / 곡 수를 표시합니다."""
+        if not hasattr(self, "right_title"):
+            return
+        name = self.current_playlist_display_name()
+        mark = " ●" if getattr(self, "playlist_dirty", False) else ""
+        count = self.list_widget.count()
+        suffix = f" · {count}곡" if count else ""
+        self.right_title.setText(f"큐시트 · {name}{mark}{suffix}")
 
     def decorate_as_card(self, widget):
         """위젯을 카드 형태로 꾸며줍니다 (ObjectName 설정 및 그림자 효과)."""
@@ -2995,6 +3059,7 @@ class PraiseSheetViewer(QMainWindow):
             self.monitor_combo.setCurrentIndex(0)
 
     def warm_up_list_widget(self):
+        self._suppress_dirty = True
         self.list_widget.setUpdatesEnabled(False)
         dummy_item = QListWidgetItem("🎼 워밍업 ⭐")
         self.list_widget.addItem(dummy_item)
@@ -3002,6 +3067,7 @@ class PraiseSheetViewer(QMainWindow):
         QApplication.processEvents()
         self.list_widget.clear()
         self.list_widget.setUpdatesEnabled(True)
+        self._suppress_dirty = False
 
     def eventFilter(self, obj, event):
         if obj == self.inspector_lyrics_edit and event.type() == QEvent.FocusOut:
@@ -3415,11 +3481,12 @@ class PraiseSheetViewer(QMainWindow):
 
         norm_path = os.path.normpath(path)
         if norm_path in self.metadata_cache:
-            key, lyrics = self.metadata_cache[norm_path]
+            meta = self.metadata_cache[norm_path]
+            key, lyrics = meta[0], meta[1]
         else:
             key, lyrics = self.get_metadata_from_db(path)
             if key or lyrics:
-                self.metadata_cache[norm_path] = (key, lyrics)
+                self.metadata_cache[norm_path] = (key, lyrics, "")
 
         self.inspector_key_combo.blockSignals(True)
         self.inspector_lyrics_edit.blockSignals(True)
@@ -3841,19 +3908,31 @@ class PraiseSheetViewer(QMainWindow):
             
             QTreeView::item, QListWidget::item {{
                 padding: 2px 6px;
+                min-height: 22px;
                 border-bottom: 1px solid transparent;
             }}
-            
+
             QTreeView::item:hover, QListWidget::item:hover {{
                 background-color: {main_bg};
                 border-radius: 4px;
                 color: {text_col};
             }}
-            
+
             QTreeView::item:selected, QListWidget::item:selected {{
                 background-color: {highlight};
                 color: {highlight_text};
                 border-radius: 4px;
+            }}
+
+            /* 트리/리스트 인라인 이름 수정 시 글씨가 잘리지 않도록 편집기 여백 확보 */
+            QTreeView QLineEdit, QListWidget QLineEdit {{
+                margin: 0px;
+                padding: 1px 4px;
+                min-height: 22px;
+                border: 1px solid {highlight};
+                border-radius: 3px;
+                background-color: {card_bg};
+                color: {text_col};
             }}
 
             /* ===== Splitter ===== */
@@ -4099,6 +4178,9 @@ class PraiseSheetViewer(QMainWindow):
             )
 
     def closeEvent(self, event):
+        if not self._confirm_discard_changes():
+            event.ignore()
+            return
         self.save_settings()
         if self.viewer:
             self.viewer.close()
@@ -4451,9 +4533,15 @@ class PraiseSheetViewer(QMainWindow):
             source_index = self.playlist_proxy_model.mapToSource(index)
             path = self.playlist_model.filePath(source_index)
             if os.path.isfile(path):
+                if path.lower().endswith(".pls"):
+                    action_open = QAction("불러오기 (현재 큐시트 대체)", self)
+                    action_open.triggered.connect(
+                        lambda _=False, p=path: self.load_list(p)
+                    )
+                    menu.addAction(action_open)
                 action_add_to_list = QAction("목록에 추가하기", self)
                 action_add_to_list.triggered.connect(
-                    lambda: self._add_paths_from_pls(path)
+                    lambda _=False, p=path: self._add_paths_from_pls(p)
                 )
                 menu.addAction(action_add_to_list)
                 menu.addSeparator()
@@ -4608,7 +4696,9 @@ class PraiseSheetViewer(QMainWindow):
             return
         if os.path.isfile(path):
             if path.lower().endswith(".pls"):
-                self._add_paths_from_pls(path)
+                # 플레이리스트 트리에서 더블클릭하면 그 큐시트를 열어서 편집(현재 내용 대체).
+                # 누적 추가가 필요하면 우클릭 > "목록에 추가하기" 사용.
+                self.load_list(path)
             elif path.lower().endswith(tuple(self.image_extensions)):
                 self.add_song_path_to_cue_sheet(path)
         elif os.path.isdir(path):
@@ -4626,8 +4716,11 @@ class PraiseSheetViewer(QMainWindow):
 
         if item_type == "text":
             self.current_preview_path = None
-            self.current_preview_text_data = item.data(Qt.UserRole + 3)
-            self.update_preview_panel(None)
+            extra = item.data(Qt.UserRole + 3) or {}
+            text_data = dict(extra)
+            text_data["text"] = item.data(Qt.UserRole) or ""
+            self.current_preview_text_data = text_data
+            self.show_text_slide_preview(text_data)
             self.load_metadata_to_inspector(None)
             self.clear_recommendations()
         else:
@@ -4696,62 +4789,145 @@ class PraiseSheetViewer(QMainWindow):
             if self.viewer and self.viewer.isVisible():
                 self.start_show_from_current()
 
-    # --- [수정] 리스트 저장 시 인터미션 여부 포함 ---
-    def save_list(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "리스트 저장", self.playlist_path, "Praise List Files (*.pls)"
-        )
-        if path:
-            if not path.lower().endswith(".pls"):
-                path += ".pls"
+    # ================= 큐시트(플레이리스트) 문서 편집 =================
+    def _on_cue_sheet_changed(self, *args):
+        """큐시트 내용이 사용자에 의해 바뀌면 '수정됨' 상태로 표시합니다."""
+        if self._suppress_dirty:
+            return
+        if not self.playlist_dirty:
+            self.playlist_dirty = True
+            self.update_playlist_window_title()
 
-            items_to_save = []
-            for i in range(self.list_widget.count()):
-                item = self.list_widget.item(i)
+    def update_playlist_window_title(self):
+        """창 제목과 큐시트 라벨에 편집 중인 큐시트 이름과 수정 여부를 표시합니다."""
+        name = self.current_playlist_display_name()
+        mark = " ●" if self.playlist_dirty else ""
+        self.setWindowTitle(f"{self.base_window_title}  —  {name}{mark}")
+        self.update_cue_count()
 
-                if item.data(Qt.UserRole + 2) == "text":
-                    extra = item.data(Qt.UserRole + 3) or {}
-                    data = {
-                        "type": "text",
-                        "text": item.data(Qt.UserRole),
-                        "theme": extra.get("theme", "말씀 (Warm Paper)"),
-                        "font_size": extra.get("font_size", 50),
-                        "font_family": extra.get("font_family", "맑은 고딕"),
-                    }
-                else:
-                    data = {
-                        "path": os.path.relpath(
-                            item.data(Qt.UserRole), self.sheet_music_path
-                        ),
-                        "is_intermission": True if item.data(Qt.UserRole + 1) else False,
-                    }
-                items_to_save.append(data)
+    def _serialize_cue_sheet(self):
+        """현재 큐시트 항목을 .pls 저장용 리스트로 직렬화합니다."""
+        items_to_save = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.data(Qt.UserRole + 2) == "text":
+                extra = item.data(Qt.UserRole + 3) or {}
+                data = {
+                    "type": "text",
+                    "text": item.data(Qt.UserRole),
+                    "theme": extra.get("theme", "말씀 (Warm Paper)"),
+                    "font_size": extra.get("font_size", 50),
+                    "font_family": extra.get("font_family", "맑은 고딕"),
+                }
+            else:
+                raw = item.data(Qt.UserRole)
+                if not raw:
+                    continue
+                data = {
+                    "path": os.path.relpath(raw, self.sheet_music_path),
+                    "is_intermission": True if item.data(Qt.UserRole + 1) else False,
+                }
+            items_to_save.append(data)
+        return items_to_save
 
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(items_to_save, f, indent=4)
-                QMessageBox.information(
-                    self, "저장 완료", "리스트가 성공적으로 저장되었습니다."
-                )
-            except Exception as e:
-                QMessageBox.critical(
-                    self, "저장 오류", f"리스트를 저장하는 중 오류가 발생했습니다: {e}"
-                )
-
-    # --- [수정] 리스트 불러오기 (호환성 유지) ---
-    def load_list(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "리스트 불러오기",
-            self.playlist_path,
-            "Praise List Files (*.pls);;All Files (*)",
-        )
-        if path:
-            self.list_widget.clear()
-            self._add_paths_from_pls(path)
-            QMessageBox.information(
-                self, "불러오기 완료", "리스트가 성공적으로 불러와졌습니다."
+    def _write_pls_to(self, path):
+        """큐시트를 지정한 .pls 경로에 저장합니다. 성공 시 True."""
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._serialize_cue_sheet(), f, indent=4, ensure_ascii=False)
+            return True
+        except Exception as e:
+            QMessageBox.critical(
+                self, "저장 오류", f"리스트를 저장하는 중 오류가 발생했습니다: {e}"
             )
+            return False
+
+    def save_list(self):
+        """열어둔 큐시트가 있으면 그 파일에 바로 덮어쓰고, 없으면(새 큐시트) 이름을 받습니다."""
+        if not self.current_playlist_path:
+            return self.save_list_as()
+        if self._write_pls_to(self.current_playlist_path):
+            self.playlist_dirty = False
+            self.update_playlist_window_title()
+            self.statusBar().showMessage(
+                f"저장됨: {os.path.basename(self.current_playlist_path)}", 3000
+            )
+            return True
+        return False
+
+    def save_list_as(self):
+        """항상 새 이름을 입력받아 저장하고, 저장한 파일을 '현재 편집 중'으로 만듭니다."""
+        start_dir = self.playlist_path
+        if self.current_playlist_path:
+            start_dir = os.path.join(
+                self.playlist_path, os.path.basename(self.current_playlist_path)
+            )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "다른 이름으로 저장", start_dir, "Praise List Files (*.pls)"
+        )
+        if not path:
+            return False
+        if not path.lower().endswith(".pls"):
+            path += ".pls"
+        if not self._write_pls_to(path):
+            return False
+        self.current_playlist_path = path
+        self.playlist_dirty = False
+        self.update_playlist_window_title()
+        self.statusBar().showMessage(f"저장됨: {os.path.basename(path)}", 3000)
+        return True
+
+    def _confirm_discard_changes(self):
+        """수정된 내용이 있으면 저장/무시/취소를 묻습니다. 계속 진행해도 되면 True."""
+        if not self.playlist_dirty:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "저장하지 않은 변경",
+            "현재 큐시트에 저장하지 않은 변경이 있습니다. 저장할까요?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if reply == QMessageBox.Cancel:
+            return False
+        if reply == QMessageBox.Save:
+            return self.save_list()
+        return True
+
+    def new_cue_sheet(self):
+        """현재 내용을 비우고 새 큐시트(제목 없음) 상태로 만듭니다."""
+        if not self._confirm_discard_changes():
+            return
+        self._suppress_dirty = True
+        self.list_widget.clear()
+        self._suppress_dirty = False
+        self.current_playlist_path = None
+        self.playlist_dirty = False
+        self.update_playlist_window_title()
+
+    def load_list(self, path=None):
+        """다른 큐시트를 불러와 현재 내용을 대체하고, 그 파일을 '편집 중'으로 만듭니다."""
+        if not self._confirm_discard_changes():
+            return
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "리스트 불러오기",
+                self.playlist_path,
+                "Praise List Files (*.pls);;All Files (*)",
+            )
+        if not path:
+            return
+        self._suppress_dirty = True
+        self.list_widget.clear()
+        self._add_paths_from_pls(path)
+        self._suppress_dirty = False
+        self.current_playlist_path = path if path.lower().endswith(".pls") else None
+        self.playlist_dirty = False
+        self.update_playlist_window_title()
+        self.statusBar().showMessage(
+            f"불러옴: {os.path.basename(path)}", 3000
+        )
 
     def preview_selected_file(self, current_index, tree_view):
         if not current_index.isValid() or current_index.column() != 0:
@@ -4779,7 +4955,43 @@ class PraiseSheetViewer(QMainWindow):
         else:
             self.load_metadata_to_inspector(None)
 
+    def _reset_preview_label_style(self):
+        """텍스트 슬라이드 미리보기용으로 입혔던 배경/폰트 스타일을 원상복구합니다."""
+        self.preview_label.setStyleSheet(
+            "background-color: transparent; border: none;"
+        )
+        self.preview_label.setWordWrap(False)
+
+    def show_text_slide_preview(self, text_data):
+        """큐시트의 텍스트 슬라이드를 중앙 미리보기 패널에 테마/폰트를 적용해 표시합니다."""
+        data = text_data or {}
+        text = (data.get("text") or "").strip() or "(빈 텍스트 슬라이드)"
+        theme = data.get("theme", "말씀 (Warm Paper)")
+        family = data.get("font_family", "맑은 고딕")
+        try:
+            base_size = int(float(data.get("font_size", 50)))
+        except (TypeError, ValueError):
+            base_size = 50
+        preview_size = max(10, int(base_size / 3))
+        style = text_slide_theme_style(theme)
+
+        self.preview_stack.setCurrentWidget(self.preview_scroll_area)
+        self.preview_label.setPixmap(QPixmap())
+        self.preview_label.setMinimumWidth(0)
+        self.preview_label.setMaximumWidth(16777215)
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setText(text)
+        self.preview_label.setStyleSheet(
+            "QLabel {"
+            f" {style['bg']} color: {style['color']};"
+            f" font-family: '{family}'; font-size: {preview_size}pt; font-weight: bold;"
+            " padding: 28px; border-radius: 6px; }"
+        )
+        self.preview_scroll_area.verticalScrollBar().setValue(0)
+
     def update_preview_panel(self, path):
+        self._reset_preview_label_style()
         if not path:
             self.preview_label.setText("파일을 선택하여 미리보세요.")
             self.preview_label.setAlignment(Qt.AlignCenter)
